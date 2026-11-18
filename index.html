@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src blob:; connect-src 'self'; font-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="私密播放器" />
+    <meta name="theme-color" content="#07080a" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta
+      name="description"
+      content="仅在本机加密存放与播放私密视频，不会上传到任何云。"
+    />
+    <title>私密播放器</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
+    <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+    <link rel="stylesheet" href="./css/app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <section id="view-insecure" class="view" hidden>
+        <div class="center-pane">
+          <div class="brand">
+            <div class="brand-mark">
+              <img src="./icons/icon-192.png" alt="" width="72" height="72" />
+            </div>
+            <h1>无法安全运行</h1>
+            <p>
+              当前页面不是 HTTPS（也不是本机 localhost），浏览器不会提供加密接口。请用
+              iPhone 自带的 Safari 打开你自己的固定 HTTPS 地址，然后添加到主屏幕。不要使用微信内置浏览器，也不要把局域网 IP
+              当作长期使用方式。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-setup" class="view" hidden>
+        <div class="center-pane">
+          <div class="brand">
+            <div class="brand-mark">
+              <img src="./icons/icon-192.png" alt="" width="72" height="72" />
+            </div>
+            <h1>私密播放器</h1>
+            <p>视频只加密保存在这台 iPhone 上，不会上传到任何服务器。</p>
+          </div>
+          <form id="form-setup" class="stack" autocomplete="off">
+            <div class="field">
+              <label for="setup-pass">设置应用密码</label>
+              <input
+                id="setup-pass"
+                type="password"
+                minlength="8"
+                maxlength="256"
+                autocomplete="new-password"
+                required
+              />
+            </div>
+            <div class="field">
+              <label for="setup-pass2">再输入一次</label>
+              <input
+                id="setup-pass2"
+                type="password"
+                minlength="8"
+                maxlength="256"
+                autocomplete="new-password"
+                required
+              />
+            </div>
+            <p class="hint">至少 8 个字符。密码不明文保存，一旦忘记将无法解密视频，也无法帮你找回。</p>
+            <button class="btn btn-primary" type="submit">开始使用</button>
+            <button class="btn btn-text" type="button" id="btn-setup-restore">已有加密备份？在本机恢复</button>
+          </form>
+        </div>
+      </section>
+
+      <section id="view-lock" class="view" hidden>
+        <div class="center-pane">
+          <div class="brand">
+            <div class="brand-mark">
+              <img src="./icons/icon-192.png" alt="" width="72" height="72" />
+            </div>
+            <h1>私密播放器已锁定</h1>
+            <p>输入应用密码解锁。密钥只留在内存中，离开后会清除。</p>
+          </div>
+          <form id="form-unlock" class="stack" autocomplete="off">
+            <div class="field">
+              <label for="unlock-pass">应用密码</label>
+              <input
+                id="unlock-pass"
+                type="password"
+                maxlength="256"
+                autocomplete="current-password"
+                required
+              />
+            </div>
+            <button class="btn btn-primary" type="submit">解锁</button>
+            <button class="btn btn-ghost" type="button" id="btn-face" hidden>使用面容 ID 解锁</button>
+            <button class="btn btn-text" type="button" id="btn-lock-restore">从加密备份恢复</button>
+          </form>
+        </div>
+      </section>
+
+      <section id="view-library" class="view" hidden>
+        <header class="topbar">
+          <h2>资料库</h2>
+          <button class="btn btn-icon" id="btn-import" type="button" aria-label="导入视频" title="导入">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button class="btn btn-icon" id="btn-shuffle" type="button" aria-label="随机连播" title="随机连播">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 7h3.5l9 10H20" />
+              <path d="M17 7h3v0l-2-2M20 7l-2 2" />
+              <path d="M4 17h3.5L11 13" />
+            </svg>
+          </button>
+          <button class="btn btn-icon" id="btn-settings" type="button" aria-label="设置" title="设置">
+            <svg viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3" />
+              <path
+                d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9c.3.7.9 1.2 1.7 1.3H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"
+              />
+            </svg>
+          </button>
+        </header>
+        <div class="library-body" id="library-body">
+          <div class="empty" id="library-empty" hidden>
+            <h3>还没有视频</h3>
+            <p>点右上角加号，从相册或「文件」多选导入。导入后会在本机加密保存。</p>
+            <div style="margin-top: 16px">
+              <button class="btn btn-primary" type="button" id="btn-import-empty">导入视频</button>
+            </div>
+          </div>
+          <div class="grid" id="library-grid"></div>
+        </div>
+      </section>
+
+      <section id="view-settings" class="view" hidden>
+        <header class="topbar">
+          <button class="btn btn-icon" id="btn-settings-back" type="button" aria-label="返回">
+            <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+          <h2>设置</h2>
+        </header>
+        <div class="settings-body">
+          <div class="group">
+            <h3>安全</h3>
+            <div class="row">
+              <label class="label" for="setting-autolock">自动锁定</label>
+              <select id="setting-autolock">
+                <option value="60000">1 分钟闲置</option>
+                <option value="120000">2 分钟闲置</option>
+                <option value="300000">5 分钟闲置</option>
+                <option value="0">仅切换到后台时</option>
+              </select>
+            </div>
+            <button class="row" type="button" id="btn-change-pass">
+              <span class="label">更改应用密码</span>
+              <span class="value">只重新包装密钥</span>
+            </button>
+            <button class="row" type="button" id="btn-enroll-face" hidden>
+              <span class="label">启用面容 ID 解锁</span>
+              <span class="value">需系统支持 PRF</span>
+            </button>
+            <button class="row" type="button" id="btn-remove-face" hidden>
+              <span class="label">关闭面容 ID 解锁</span>
+              <span class="value">仍可使用密码</span>
+            </button>
+            <p class="row-note" id="face-note"></p>
+          </div>
+          <div class="group">
+            <h3>备份（仅保存到你自己的文件或网盘）</h3>
+            <button class="row" type="button" id="btn-export">
+              <span class="label">导出加密备份</span>
+              <span class="value">仍需密码才能打开</span>
+            </button>
+            <button class="row" type="button" id="btn-restore">
+              <span class="label">从备份恢复</span>
+              <span class="value">选择本机备份文件</span>
+            </button>
+            <p class="row-note">不会自动上传。请定期把备份存到「文件」、iCloud 或你自己的网盘，以防网站数据被系统清理。</p>
+          </div>
+          <div class="group">
+            <h3>存储</h3>
+            <div class="row">
+              <span class="label">用量</span>
+              <span class="value" id="storage-usage">计算中…</span>
+            </div>
+            <div class="row">
+              <span class="label">持久化存储</span>
+              <span class="value" id="storage-persist">未知</span>
+            </div>
+            <button class="row" type="button" id="btn-persist">
+              <span class="label">请求尽量不要清理</span>
+              <span class="value">persist()</span>
+            </button>
+            <p class="row-note">
+              iOS 仍可能在存储紧张时删除网站数据。请把它添加到主屏幕，并定期导出加密备份。这不是 App
+              Store 原生应用，无法做到系统级禁止截屏。
+            </p>
+          </div>
+          <div class="group">
+            <h3>关于</h3>
+            <div class="row">
+              <span class="label">应用</span>
+              <span class="value">私密播放器 · 免费本地使用</span>
+            </div>
+            <p class="row-note">
+              无账号、无广告、无跟踪。所有程序文件都在本机。加密根是你设置的应用密码。网页环境下面容
+              ID 只有在 Safari 真正提供 WebAuthn PRF 时才会启用。
+            </p>
+          </div>
+          <div style="padding: 8px 0 20px">
+            <button class="btn btn-danger" type="button" id="btn-lock-now" style="width: 100%">立即锁定</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-player" class="view" hidden>
+        <div id="playerStage">
+          <video
+            id="playerVideo"
+            playsinline
+            webkit-playsinline
+            preload="metadata"
+            controlslist="nodownload noplaybackrate noremoteplayback"
+            disablepictureinpicture
+          ></video>
+          <div class="player-overlay" id="playerOverlay">
+            <div class="player-top">
+              <button class="btn btn-icon" id="btn-player-close" type="button" aria-label="关闭">
+                <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+              </button>
+              <div class="player-title" id="playerTitle"></div>
+              <span class="badge" id="shuffleBadge" hidden>随机</span>
+              <button class="btn btn-icon" id="btn-fullscreen" type="button" aria-label="全屏">
+                <svg viewBox="0 0 24 24">
+                  <path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4" />
+                </svg>
+              </button>
+            </div>
+            <div class="player-bottom">
+              <div class="progress-row">
+                <span id="timeCurrent">0:00</span>
+                <input id="seekBar" type="range" min="0" max="1000" value="0" />
+                <span id="timeTotal">0:00</span>
+              </div>
+              <div class="transport">
+                <button class="btn btn-icon" id="btn-prev" type="button" aria-label="上一条">
+                  <svg viewBox="0 0 24 24"><path d="M18 5v14L8 12z" fill="currentColor" stroke="none" /><path d="M6 5v14" /></svg>
+                </button>
+                <button class="btn btn-icon" id="btn-play" type="button" aria-label="播放">
+                  <svg viewBox="0 0 24 24" id="iconPlay"><path d="M8 5v14l11-7z" fill="currentColor" stroke="none" /></svg>
+                  <svg viewBox="0 0 24 24" id="iconPause" hidden><path d="M7 5h3v14H7zM14 5h3v14h-3z" fill="currentColor" stroke="none" /></svg>
+                </button>
+                <button class="btn btn-icon" id="btn-next" type="button" aria-label="下一条">
+                  <svg viewBox="0 0 24 24"><path d="M6 5v14l10-7z" fill="currentColor" stroke="none" /><path d="M18 5v14" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div id="overlay" hidden>
+        <div class="sheet" id="sheet"></div>
+      </div>
+      <div id="progressPane" hidden>
+        <div class="progress-card">
+          <h3 id="progressTitle">处理中</h3>
+          <p id="progressText"></p>
+          <div class="bar"><span id="progressBar"></span></div>
+        </div>
+      </div>
+      <div id="toast" hidden></div>
+    </div>
+
+    <input id="file-import" type="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm" multiple hidden />
+    <input id="file-backup" type="file" accept=".ppb,application/octet-stream" hidden />
+
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>
