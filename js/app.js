@@ -45,6 +45,17 @@ import {
   formatDateTime,
   randomId,
 } from "./util.js";
+import {
+  EXPORT_HELP_PARAGRAPHS,
+  PLAIN_EXPORT_WARNING,
+  applyExportAction,
+  createExportSession,
+  deletionAllowed,
+  exportContentType,
+  exportFileName,
+  plainUrlRevokeDelayMs,
+  shouldSuppressAutoLock,
+} from "./export.js";
 
 const LARGE_FILE_BYTES = 400 * 1024 * 1024;
 const HIDE_CONTROLS_MS = 3500;
@@ -70,6 +81,10 @@ const state = {
   seeking: false,
   currentView: null,
   busy: 0,
+  plainExport: null,
+  exportShareActive: false,
+  exportGen: 0,
+  sheetDismiss: null,
 };
 
 function beginBusy() {
@@ -83,7 +98,10 @@ function endBusy() {
 }
 
 function canAutoLock() {
-  return state.unlocked && state.busy === 0;
+  if (shouldSuppressAutoLock({ exportShareActive: state.exportShareActive, busy: state.busy })) {
+    return false;
+  }
+  return state.unlocked;
 }
 
 function emptyCatalog() {
@@ -117,12 +135,21 @@ function toast(message) {
   }, 2600);
 }
 
+function clearToast() {
+  clearTimeout(toast._t);
+  const el = $("toast");
+  if (el) el.hidden = true;
+}
+
 function closeOverlay() {
+  state.sheetDismiss = null;
   $("overlay").hidden = true;
   $("sheet").replaceChildren();
 }
 
-function openSheet({ title, body, actions, center = true }) {
+function openSheet({ title, body, actions, center = true, onDismiss = null }) {
+  clearToast();
+  state.sheetDismiss = onDismiss;
   const overlay = $("overlay");
   const sheet = $("sheet");
   sheet.replaceChildren();
@@ -148,8 +175,9 @@ function openSheet({ title, body, actions, center = true }) {
         await action.onClick?.();
         return;
       }
+      const run = action.onClick;
       closeOverlay();
-      await action.onClick?.();
+      await run?.();
     });
     stack.append(btn);
   }
@@ -178,7 +206,12 @@ function confirmDialog(title, body, { confirmLabel = "确定", danger = false } 
 function showProgress(title, text, ratio = 0) {
   $("progressTitle").textContent = title;
   $("progressText").textContent = text || "";
-  $("progressBar").style.width = `${Math.max(0, Math.min(1, ratio)) * 100}%`;
+  const bar = $("progressBar");
+  const step = Math.round(Math.max(0, Math.min(1, ratio)) * 20) * 5;
+  for (const name of [...bar.classList]) {
+    if (name.startsWith("w")) bar.classList.remove(name);
+  }
+  bar.classList.add(`w${step}`);
   $("progressPane").hidden = false;
 }
 
@@ -253,6 +286,7 @@ function bumpActivity() {
 }
 
 async function lock(_reason) {
+  if (state.plainExport) abortPlainExport("lock");
   if (!state.unlocked && state.currentView !== "view-player") {
     stopPlayback();
     return;
@@ -461,7 +495,7 @@ function renderLibrary() {
     const del = document.createElement("button");
     del.type = "button";
     del.className = "card-delete";
-    del.setAttribute("aria-label", "删除");
+    del.setAttribute("aria-label", "删除或导出");
     del.innerHTML =
       '<svg viewBox="0 0 24 24"><path d="M6 7h12M10 7V5h4v2M9 7l1 12h4l1-12"/></svg>';
     del.addEventListener("click", (ev) => {
@@ -484,24 +518,472 @@ function renderLibrary() {
   }
 }
 
-async function confirmDelete(item) {
-  const ok = await confirmDialog(
-    "删除这部视频？",
-    `将从本机删除「${item.name || "未命名视频"}」。删除后无法恢复，除非你有备份。`,
-    { confirmLabel: "删除", danger: true }
-  );
-  if (!ok) return;
-  await deleteEncryptedVideo(item.id);
-  await deleteEncryptedThumb(item.id);
-  const thumbUrl = state.thumbUrls.get(item.id);
-  if (thumbUrl) {
-    URL.revokeObjectURL(thumbUrl);
-    state.thumbUrls.delete(item.id);
+const EXPORT_ABORT_TOAST = {
+  lock: "应用已锁定，未删除加密副本",
+  cancel: "已取消，未删除加密副本",
+  "wrong-key": "密钥不正确，未删除加密副本",
+  "decrypt-fail": "解密失败，未删除加密副本",
+  "share-aborted": "已取消分享，未删除加密副本",
+  "share-failed": "导出失败，未删除加密副本",
+  "deny-saved": "尚未确认保存成功，未删除加密副本",
+};
+
+function exportStillCurrent(gen) {
+  return Boolean(state.unlocked && state.dekKey && state.plainExport && state.plainExport.gen === gen);
+}
+
+function releasePlainFile(exp, { immediate }) {
+  if (!exp) return;
+  const url = exp.url;
+  const delay = plainUrlRevokeDelayMs({
+    shareActive: state.exportShareActive,
+    downloadTriggered: Boolean(exp.downloadTriggered),
+    immediate,
+  });
+  exp.file = null;
+  exp.url = null;
+  if (!url || delay == null) return;
+  if (delay === 0) URL.revokeObjectURL(url);
+  else setTimeout(() => URL.revokeObjectURL(url), delay);
+}
+
+function abortPlainExport(reason, { silent = false } = {}) {
+  const exp = state.plainExport;
+  state.exportGen += 1;
+  state.plainExport = null;
+  state.exportShareActive = false;
+  if (exp) {
+    const result = applyExportAction(exp.session, { type: reason });
+    if (result.deleteEncryptedCopy) {
+      state.plainExport = exp;
+      toast("未删除加密副本");
+      return;
+    }
+    releasePlainFile(exp, { immediate: true });
   }
-  state.catalog.videos = state.catalog.videos.filter((v) => v.id !== item.id);
-  await persistCatalog();
-  renderLibrary();
-  toast("已删除");
+  closeOverlay();
+  hideProgress();
+  if (!silent && exp) toast(EXPORT_ABORT_TOAST[reason] || "未删除加密副本");
+}
+
+function waitUntilVisible(timeoutMs) {
+  if (!document.hidden) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const done = (value) => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      resolve(value);
+    };
+    const onVisible = () => {
+      if (!document.hidden) done(true);
+    };
+    const timer = setTimeout(() => done(!document.hidden), timeoutMs);
+    document.addEventListener("visibilitychange", onVisible);
+  });
+}
+
+function plainExportWarningBody(item) {
+  const name = item.name || "未命名视频";
+  const wrap = document.createElement("div");
+  const lead = document.createElement("p");
+  lead.textContent = `将只在这台设备上把「${name}」解密成原视频，再交给系统分享，由你保存到「文件」、相册或你自己的网盘。不会上传到开发者的服务器。`;
+  const warn = document.createElement("p");
+  warn.className = "alert alert-danger";
+  warn.textContent = PLAIN_EXPORT_WARNING;
+  wrap.append(lead, warn);
+  if (item.size > LARGE_FILE_BYTES) {
+    const big = document.createElement("p");
+    big.textContent = `这个文件约 ${formatBytes(item.size)}，解密时会占用较多内存，iPhone 可能内存不足。`;
+    wrap.append(big);
+  }
+  return wrap;
+}
+
+function confirmDelete(item) {
+  const name = item.name || "未命名视频";
+  const wrap = document.createElement("div");
+  const lead = document.createElement("p");
+  lead.textContent = `将从本机删除「${name}」。删除后无法恢复，除非你有备份。`;
+  const warn = document.createElement("p");
+  warn.className = "alert alert-danger";
+  warn.textContent = `${PLAIN_EXPORT_WARNING}也可以先解密导出，再决定是否删除。`;
+  wrap.append(lead, warn);
+  openSheet({
+    title: "删除这部视频？",
+    body: wrap,
+    actions: [
+      {
+        label: "解密导出",
+        className: "btn-primary",
+        onClick: () => startPlainExport(item),
+      },
+      {
+        label: "删除",
+        className: "btn-danger",
+        onClick: () => performDelete(item, "library"),
+      },
+      { label: "取消", className: "btn-ghost" },
+    ],
+  });
+}
+
+async function performDelete(item, cause) {
+  if (!item?.id) return false;
+  if (cause === "export") {
+    const exp = state.plainExport;
+    if (!exp || exp.item.id !== item.id || !deletionAllowed(exp.session)) return false;
+  } else if (cause !== "library") {
+    return false;
+  }
+  if (!state.unlocked || !state.dekKey) {
+    toast("应用已锁定，未删除");
+    return false;
+  }
+  if (!state.catalog.videos.some((video) => video.id === item.id)) return false;
+  beginBusy();
+  try {
+    await deleteEncryptedVideo(item.id);
+    await deleteEncryptedThumb(item.id);
+    const thumbUrl = state.thumbUrls.get(item.id);
+    if (thumbUrl) {
+      URL.revokeObjectURL(thumbUrl);
+      state.thumbUrls.delete(item.id);
+    }
+    state.catalog.videos = state.catalog.videos.filter((video) => video.id !== item.id);
+    await persistCatalog();
+    renderLibrary();
+    toast("已删除");
+    return true;
+  } catch (err) {
+    toast(err?.message || "删除失败，加密副本仍保留");
+    return false;
+  } finally {
+    endBusy();
+  }
+}
+
+function startPlainExport(item) {
+  if (!state.unlocked || !state.dekKey) {
+    toast("应用已锁定，未删除加密副本");
+    return;
+  }
+  if (state.plainExport) abortPlainExport("cancel", { silent: true });
+  state.exportGen += 1;
+  const gen = state.exportGen;
+  state.plainExport = {
+    gen,
+    item,
+    session: createExportSession(item.id),
+    file: null,
+    url: null,
+    sharing: false,
+    downloadTriggered: false,
+  };
+  openSheet({
+    title: "导出未加密原视频？",
+    body: plainExportWarningBody(item),
+    onDismiss: () => {
+      if (state.plainExport?.gen === gen) abortPlainExport("cancel");
+    },
+    actions: [
+      {
+        label: "开始解密",
+        className: "btn-primary",
+        onClick: () => decryptForExport(item, gen),
+      },
+      {
+        label: "取消",
+        className: "btn-ghost",
+        onClick: () => abortPlainExport("cancel"),
+      },
+    ],
+  });
+}
+
+async function decryptForExport(item, gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen || exp.item.id !== item.id) return;
+  if (!state.unlocked || !state.dekKey) {
+    abortPlainExport("lock");
+    return;
+  }
+  const accepted = applyExportAction(exp.session, { type: "accept-warning" });
+  if (accepted.rejected || accepted.deleteEncryptedCopy) {
+    abortPlainExport("cancel");
+    return;
+  }
+  exp.session = accepted.session;
+  beginBusy();
+  try {
+    showProgress("正在本机解密", item.name || "未命名视频", 0);
+    const enc = await readEncryptedVideo(item.id);
+    if (!exportStillCurrent(gen)) return;
+    if (!enc) throw new Error("加密文件丢失，可能已被系统清理。");
+    const mime = exportContentType(item.name, item.mime);
+    const plainBlob = await decryptPvidBlob(state.dekKey, enc, {
+      mime,
+      onProgress: (done, total) => {
+        if (!exportStillCurrent(gen)) return;
+        showProgress(
+          "正在本机解密",
+          `${item.name || "未命名视频"}（${formatBytes(done)} / ${formatBytes(total)}）`,
+          total ? done / total : 0
+        );
+      },
+    });
+    if (!exportStillCurrent(gen)) return;
+    const name = exportFileName(item.name, mime);
+    const parsedTime = Date.parse(item.createdAt || "");
+    const file = new File([plainBlob], name, {
+      type: mime,
+      lastModified: Number.isFinite(parsedTime) ? parsedTime : Date.now(),
+    });
+    const ready = applyExportAction(exp.session, { type: "decrypt-ok" });
+    if (ready.rejected || ready.deleteEncryptedCopy || !exportStillCurrent(gen)) {
+      abortPlainExport("decrypt-fail");
+      return;
+    }
+    exp.session = ready.session;
+    exp.file = file;
+    hideProgress();
+    showReadyToSaveSheet(item, gen);
+  } catch (err) {
+    if (!exportStillCurrent(gen)) return;
+    hideProgress();
+    const wrong = err?.code === "DECRYPT_FAIL" || err?.code === "BAD_PASSWORD";
+    abortPlainExport(wrong ? "wrong-key" : "decrypt-fail");
+  } finally {
+    endBusy();
+  }
+}
+
+function showReadyToSaveSheet(item, gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen || !exp.file) return;
+  const wrap = document.createElement("div");
+  const lead = document.createElement("p");
+  lead.textContent = `「${exp.file.name}」已在本机解密，尚未离开这台设备。请点「保存到系统…」，用系统分享保存到「文件」、相册或你的网盘。`;
+  const warn = document.createElement("p");
+  warn.className = "alert alert-danger";
+  warn.textContent = PLAIN_EXPORT_WARNING;
+  const note = document.createElement("p");
+  note.textContent =
+    "点保存前如果切到别的应用，播放器会锁定并取消这次导出，不会删除加密副本。系统分享结束或开始下载，都不代表文件已经保存成功。";
+  wrap.append(lead, warn, note);
+  openSheet({
+    title: "请点保存",
+    body: wrap,
+    onDismiss: () => {
+      if (state.plainExport?.gen === gen && !state.exportShareActive) abortPlainExport("cancel");
+    },
+    actions: [
+      {
+        label: "保存到系统…",
+        className: "btn-primary",
+        keepOpen: true,
+        onClick: () => handoffPlainExport(item, gen),
+      },
+      {
+        label: "取消",
+        className: "btn-ghost",
+        onClick: () => abortPlainExport("cancel"),
+      },
+    ],
+  });
+}
+
+function triggerPlainDownload(exp, file) {
+  const url = URL.createObjectURL(file);
+  exp.url = url;
+  exp.downloadTriggered = true;
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = file.name;
+  link.rel = "noopener";
+  link.className = "export-download-link";
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+async function handoffPlainExport(item, gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen || exp.sharing || !exp.file) return;
+  if (!state.unlocked || !state.dekKey) {
+    abortPlainExport("lock");
+    return;
+  }
+  if (exp.session.phase !== "ready") return;
+  const file = exp.file;
+  exp.sharing = true;
+  state.exportShareActive = true;
+  beginBusy();
+  let outcome = null;
+  let failed = null;
+  try {
+    let canFileShare = false;
+    try {
+      canFileShare =
+        typeof navigator.share === "function" &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({ files: [file] });
+    } catch {
+      canFileShare = false;
+    }
+    if (canFileShare) {
+      await navigator.share({ files: [file], title: file.name });
+      outcome = "share-resolved";
+    } else {
+      triggerPlainDownload(exp, file);
+      outcome = "download-triggered";
+    }
+  } catch (err) {
+    failed = err;
+  }
+  const visible = failed ? true : await waitUntilVisible(4000);
+  exp.sharing = false;
+  state.exportShareActive = false;
+  endBusy();
+  if (!exportStillCurrent(gen)) return;
+  if (failed) {
+    if (failed.name === "AbortError") {
+      abortPlainExport("share-aborted");
+      return;
+    }
+    toast("系统分享没有完成，请再点一次保存。未删除加密副本");
+    return;
+  }
+  if (!visible) {
+    await lock("分享后仍在后台");
+    return;
+  }
+  const stepped = applyExportAction(exp.session, { type: outcome });
+  if (stepped.rejected || stepped.deleteEncryptedCopy || deletionAllowed(stepped.session)) {
+    abortPlainExport("cancel");
+    toast("导出状态异常，未删除加密副本");
+    return;
+  }
+  exp.session = stepped.session;
+  askWhetherSaved(item, gen);
+}
+
+function askWhetherSaved(item, gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen) return;
+  const wrap = document.createElement("div");
+  const lead = document.createElement("p");
+  lead.textContent =
+    "系统分享或下载已经交给系统，但这不等于文件已经存进「文件」、相册或网盘。请先到保存位置打开检查，确认未加密原视频完整可用。";
+  const warn = document.createElement("p");
+  warn.className = "alert alert-danger";
+  warn.textContent = PLAIN_EXPORT_WARNING;
+  wrap.append(lead, warn);
+  openSheet({
+    title: "请确认已经保存成功",
+    body: wrap,
+    onDismiss: () => {
+      if (state.plainExport?.gen === gen) abortPlainExport("deny-saved");
+    },
+    actions: [
+      {
+        label: "已经保存成功",
+        className: "btn-primary",
+        onClick: () => confirmSavedForExport(item, gen),
+      },
+      {
+        label: "还没有，先保留",
+        className: "btn-ghost",
+        onClick: () => abortPlainExport("deny-saved"),
+      },
+    ],
+  });
+}
+
+function confirmSavedForExport(item, gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen || !state.unlocked || !state.dekKey) {
+    abortPlainExport("lock");
+    return;
+  }
+  const stepped = applyExportAction(exp.session, { type: "confirm-saved" });
+  if (stepped.rejected || stepped.deleteEncryptedCopy || !deletionAllowed(stepped.session)) {
+    abortPlainExport("cancel");
+    return;
+  }
+  exp.session = stepped.session;
+  askDeleteEncryptedCopy(item, gen);
+}
+
+function askDeleteEncryptedCopy(item, gen) {
+  const name = item.name || "未命名视频";
+  const wrap = document.createElement("div");
+  const lead = document.createElement("p");
+  lead.textContent = `你已确认「${name}」的未加密原视频保存成功。是否从播放器中删除加密副本？可以只导出、不删除。`;
+  wrap.append(lead);
+  openSheet({
+    title: "删除播放器里的加密副本？",
+    body: wrap,
+    onDismiss: () => keepExportedCopy(gen),
+    actions: [
+      {
+        label: "删除加密副本",
+        className: "btn-danger",
+        onClick: () => finalizeExportDelete(item, gen),
+      },
+      {
+        label: "只导出，不删除",
+        className: "btn-ghost",
+        onClick: () => keepExportedCopy(gen),
+      },
+    ],
+  });
+}
+
+function keepExportedCopy(gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen) return;
+  const stepped = applyExportAction(exp.session, { type: "keep-copy" });
+  if (stepped.deleteEncryptedCopy) {
+    abortPlainExport("cancel");
+    return;
+  }
+  releasePlainFile(exp, { immediate: !exp.downloadTriggered });
+  state.plainExport = null;
+  state.exportGen += 1;
+  toast("已保留播放器中的加密副本");
+}
+
+async function finalizeExportDelete(item, gen) {
+  const exp = state.plainExport;
+  if (!exp || exp.gen !== gen || exp.item.id !== item.id || !state.unlocked || !state.dekKey) {
+    abortPlainExport("lock");
+    return;
+  }
+  if (!deletionAllowed(exp.session)) {
+    abortPlainExport("cancel");
+    return;
+  }
+  const removed = await performDelete(item, "export");
+  if (!exportStillCurrent(gen)) return;
+  if (!removed) return;
+  applyExportAction(state.plainExport.session, { type: "confirm-delete" });
+  releasePlainFile(exp, { immediate: !exp.downloadTriggered });
+  state.plainExport = null;
+  state.exportGen += 1;
+}
+
+function openExportHelp() {
+  const wrap = document.createElement("div");
+  for (const text of EXPORT_HELP_PARAGRAPHS) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = text;
+    wrap.append(paragraph);
+  }
+  openSheet({
+    title: "解密导出说明",
+    body: wrap,
+    actions: [{ label: "知道了", className: "btn-primary" }],
+  });
 }
 
 async function importFiles(fileList) {
@@ -1142,6 +1624,7 @@ function bindEvents() {
   $("btn-enroll-face").addEventListener("click", enrollFace);
   $("btn-remove-face").addEventListener("click", removeFace);
   $("btn-export").addEventListener("click", exportBackup);
+  $("btn-export-help").addEventListener("click", openExportHelp);
   $("btn-restore").addEventListener("click", () => askBackupAndRestore("merge"));
   $("btn-persist").addEventListener("click", async () => {
     const result = await requestPersist();
@@ -1219,14 +1702,36 @@ function bindEvents() {
     if (canAutoLock()) lock("页面隐藏");
   });
   $("overlay").addEventListener("click", (ev) => {
-    if (ev.target === $("overlay")) closeOverlay();
+    if (ev.target !== $("overlay")) return;
+    const dismiss = state.sheetDismiss;
+    closeOverlay();
+    dismiss?.();
   });
 }
 
 async function registerSw() {
   if (!("serviceWorker" in navigator)) return;
   try {
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!hadController) return;
+      if (state.unlocked || state.plainExport || state.exportShareActive || state.busy > 0) return;
+      try {
+        if (sessionStorage.getItem("pp-sw-reload") === "1") return;
+        sessionStorage.setItem("pp-sw-reload", "1");
+      } catch {
+        return;
+      }
+      location.reload();
+    });
     await navigator.serviceWorker.register("./sw.js", { scope: "./" });
+    setTimeout(() => {
+      try {
+        sessionStorage.removeItem("pp-sw-reload");
+      } catch {
+        /* 忽略无法使用的会话存储 */
+      }
+    }, 10000);
   } catch {
     /* HTTP 局域网等环境下会失败，预览仍可使用界面 */
   }

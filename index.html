@@ -19,7 +19,7 @@
     <meta name="format-detection" content="telephone=no" />
     <meta
       name="description"
-      content="仅在本机加密存放与播放私密视频，不会上传到任何云。"
+      content="仅在本机加密存放与播放私密视频，不会上传到任何云。解密导出的是未加密原视频。"
     />
     <title>私密播放器</title>
     <link rel="manifest" href="./manifest.webmanifest" />
@@ -189,6 +189,16 @@
               <span class="value">选择本机备份文件</span>
             </button>
             <p class="row-note">不会自动上传。请定期把备份存到「文件」、iCloud 或你自己的网盘，以防网站数据被系统清理。</p>
+          </div>
+          <div class="group">
+            <h3>解密导出</h3>
+            <button class="row" type="button" id="btn-export-help">
+              <span class="label">使用说明与安全说明</span>
+              <span class="value">未加密</span>
+            </button>
+            <p class="row-note">
+              导出的是未加密原视频，不再受播放器密码或面容保护。文件只通过系统分享留在你自己的「文件」、相册或网盘，不会上传到开发者的服务器。系统分享结束或开始下载，都不代表已经保存成功。只有你点「已经保存成功」之后，才会再询问是否删除加密副本。
+            </p>
           </div>
           <div class="group">
             <h3>存储</h3>
