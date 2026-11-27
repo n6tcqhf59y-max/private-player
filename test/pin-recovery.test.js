@@ -238,7 +238,11 @@ describe("随机打开与界面伪装", () => {
     for (const file of [html, manifest, app, readme]) {
       assert.equal(file.includes("私密播放器"), false);
     }
-    assert.match(sw, /gitbb-v3/);
+    assert.match(sw, /gitbb-v4/);
+    assert.doesNotMatch(html, /rel="icon"|apple-touch-icon|icons\//);
+    assert.doesNotMatch(manifest, /"icons"/);
+    assert.doesNotMatch(sw, /icons\//);
+    assert.match(html, /id="gate-grid"/);
     assert.match(sw, /\/js\/pinflow\.js/);
     assert.match(sw, /\/js\/recovery\.js/);
     assert.match(app, /advanceGate/);

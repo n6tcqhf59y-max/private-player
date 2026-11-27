@@ -314,7 +314,8 @@ describe("现有加密格式仍兼容", () => {
 describe("service worker", () => {
   it("缓存版本已更新，并包含新的导出模块", () => {
     const sw = readRoot("sw.js");
-    assert.match(sw, /gitbb-v3/);
+    assert.match(sw, /gitbb-v4/);
+    assert.doesNotMatch(sw, /gitbb-v3/);
     assert.doesNotMatch(sw, /private-player-v2/);
     assert.doesNotMatch(sw, /private-player-v1/);
     assert.match(sw, /networkFirst/);
