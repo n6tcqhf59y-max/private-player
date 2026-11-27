@@ -13,15 +13,12 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="私密播放器" />
-    <meta name="theme-color" content="#07080a" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="apple-mobile-web-app-title" content="gitbb" />
+    <meta name="theme-color" content="#243044" />
+    <meta name="color-scheme" content="light" />
     <meta name="format-detection" content="telephone=no" />
-    <meta
-      name="description"
-      content="仅在本机加密存放与播放私密视频，不会上传到任何云。解密导出的是未加密原视频。"
-    />
-    <title>私密播放器</title>
+    <meta name="description" content="gitbb" />
+    <title>gitbb</title>
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
     <link rel="apple-touch-icon" href="./icons/icon-180.png" />
@@ -45,83 +42,87 @@
         </div>
       </section>
 
-      <section id="view-setup" class="view" hidden>
-        <div class="center-pane">
-          <div class="brand">
-            <div class="brand-mark">
-              <img src="./icons/icon-192.png" alt="" width="72" height="72" />
-            </div>
-            <h1>私密播放器</h1>
-            <p>视频只加密保存在这台 iPhone 上，不会上传到任何服务器。</p>
-          </div>
-          <form id="form-setup" class="stack" autocomplete="off">
-            <div class="field">
-              <label for="setup-pass">设置应用密码</label>
-              <input
-                id="setup-pass"
-                type="password"
-                minlength="8"
-                maxlength="256"
-                autocomplete="new-password"
-                required
-              />
-            </div>
-            <div class="field">
-              <label for="setup-pass2">再输入一次</label>
-              <input
-                id="setup-pass2"
-                type="password"
-                minlength="8"
-                maxlength="256"
-                autocomplete="new-password"
-                required
-              />
-            </div>
-            <p class="hint">至少 8 个字符。密码不明文保存，一旦忘记将无法解密视频，也无法帮你找回。</p>
-            <button class="btn btn-primary" type="submit">开始使用</button>
-            <button class="btn btn-text" type="button" id="btn-setup-restore">已有加密备份？在本机恢复</button>
-          </form>
+      <section id="view-gate" class="view" hidden>
+        <header class="topbar">
+          <button class="btn btn-icon" id="btn-gate-back" type="button" aria-label="返回上一层" hidden>
+            <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+          <h2 id="gate-title">gitbb</h2>
+        </header>
+        <p id="gate-path" class="gate-path">gitbb</p>
+        <p id="gate-hint" class="gate-hint"></p>
+        <div id="gate-grid" class="folder-grid"></div>
+        <div class="gate-footer">
+          <button class="btn btn-text" type="button" id="btn-gate-restore">已有备份</button>
+          <button class="btn btn-text" type="button" id="btn-face" hidden>面容打开</button>
+          <button class="btn btn-text" type="button" id="btn-legacy-pass" hidden>用原来的口令</button>
         </div>
       </section>
 
-      <section id="view-lock" class="view" hidden>
-        <div class="center-pane">
-          <div class="brand">
-            <div class="brand-mark">
-              <img src="./icons/icon-192.png" alt="" width="72" height="72" />
-            </div>
-            <h1>私密播放器已锁定</h1>
-            <p>输入应用密码解锁。密钥只留在内存中，离开后会清除。</p>
+      <section id="view-secret" class="view" hidden>
+        <header class="topbar">
+          <button class="btn btn-icon" id="btn-secret-back" type="button" aria-label="返回">
+            <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+          <h2 id="secret-title">问题</h2>
+        </header>
+        <form id="form-secret" class="secret-form" autocomplete="off">
+          <p id="secret-lead" class="secret-lead"></p>
+          <div class="field" id="field-secret-question">
+            <label for="secret-question">问题</label>
+            <input
+              id="secret-question"
+              type="text"
+              maxlength="80"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
           </div>
-          <form id="form-unlock" class="stack" autocomplete="off">
-            <div class="field">
-              <label for="unlock-pass">应用密码</label>
-              <input
-                id="unlock-pass"
-                type="password"
-                maxlength="256"
-                autocomplete="current-password"
-                required
-              />
-            </div>
-            <button class="btn btn-primary" type="submit">解锁</button>
-            <button class="btn btn-ghost" type="button" id="btn-face" hidden>使用面容 ID 解锁</button>
-            <button class="btn btn-text" type="button" id="btn-lock-restore">从加密备份恢复</button>
-          </form>
-        </div>
+          <div class="field">
+            <label for="secret-answer">答案</label>
+            <input
+              id="secret-answer"
+              type="text"
+              maxlength="200"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              enterkeyhint="done"
+            />
+          </div>
+          <div class="field" id="field-secret-answer2">
+            <label for="secret-answer2">再填一次答案</label>
+            <input
+              id="secret-answer2"
+              type="text"
+              maxlength="200"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+          </div>
+          <p id="secret-hint" class="hint"></p>
+          <p id="secret-lockout" class="hint" hidden></p>
+          <button class="btn btn-primary" type="submit" id="btn-secret-submit">继续</button>
+        </form>
       </section>
 
       <section id="view-library" class="view" hidden>
         <header class="topbar">
-          <h2>资料库</h2>
-          <button class="btn btn-icon" id="btn-import" type="button" aria-label="导入视频" title="导入">
+          <h2>gitbb</h2>
+          <button class="btn btn-icon" id="btn-import" type="button" aria-label="添加文件" title="添加文件">
             <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-          <button class="btn btn-icon" id="btn-shuffle" type="button" aria-label="随机连播" title="随机连播">
+          <button class="btn btn-icon" id="btn-shuffle" type="button" aria-label="随机打开全部" title="随机打开">
             <svg viewBox="0 0 24 24">
-              <path d="M4 7h3.5l9 10H20" />
-              <path d="M17 7h3v0l-2-2M20 7l-2 2" />
-              <path d="M4 17h3.5L11 13" />
+              <path d="M4 8h12" />
+              <path d="M13 5l4 3-4 3" />
+              <path d="M20 16H8" />
+              <path d="M11 13l-4 3 4 3" />
             </svg>
           </button>
           <button class="btn btn-icon" id="btn-settings" type="button" aria-label="设置" title="设置">
@@ -135,10 +136,10 @@
         </header>
         <div class="library-body" id="library-body">
           <div class="empty" id="library-empty" hidden>
-            <h3>还没有视频</h3>
-            <p>点右上角加号，从相册或「文件」多选导入。导入后会在本机加密保存。</p>
-            <div style="margin-top: 16px">
-              <button class="btn btn-primary" type="button" id="btn-import-empty">导入视频</button>
+            <h3>这个文件夹是空的</h3>
+            <p>点右上角加号，从相册或「文件」放进来。文件会留在这台设备上，不会自动删掉原来的那一份。</p>
+            <div class="empty-action">
+              <button class="btn btn-primary" type="button" id="btn-import-empty">添加文件</button>
             </div>
           </div>
           <div class="grid" id="library-grid"></div>
@@ -165,16 +166,20 @@
               </select>
             </div>
             <button class="row" type="button" id="btn-change-pass">
-              <span class="label">更改应用密码</span>
+              <span class="label">更改六层路径</span>
               <span class="value">只重新包装密钥</span>
             </button>
+            <button class="row" type="button" id="btn-change-secret">
+              <span class="label">更改找回问题</span>
+              <span class="value">答案不会明文保存</span>
+            </button>
             <button class="row" type="button" id="btn-enroll-face" hidden>
-              <span class="label">启用面容 ID 解锁</span>
+              <span class="label">启用面容 ID</span>
               <span class="value">需系统支持 PRF</span>
             </button>
             <button class="row" type="button" id="btn-remove-face" hidden>
-              <span class="label">关闭面容 ID 解锁</span>
-              <span class="value">仍可使用密码</span>
+              <span class="label">关闭面容 ID</span>
+              <span class="value">仍可使用路径</span>
             </button>
             <p class="row-note" id="face-note"></p>
           </div>
@@ -182,7 +187,7 @@
             <h3>备份（仅保存到你自己的文件或网盘）</h3>
             <button class="row" type="button" id="btn-export">
               <span class="label">导出加密备份</span>
-              <span class="value">仍需密码才能打开</span>
+              <span class="value">仍需路径才能打开</span>
             </button>
             <button class="row" type="button" id="btn-restore">
               <span class="label">从备份恢复</span>
@@ -223,15 +228,15 @@
             <h3>关于</h3>
             <div class="row">
               <span class="label">应用</span>
-              <span class="value">私密播放器 · 免费本地使用</span>
+              <span class="value">gitbb · 只在这台设备上</span>
             </div>
             <p class="row-note">
-              无账号、无广告、无跟踪。所有程序文件都在本机。加密根是你设置的应用密码。网页环境下面容
+              无账号、无广告、无跟踪。所有程序文件都在本机。打开 gitbb 的是你选的六层路径。网页环境下面容
               ID 只有在 Safari 真正提供 WebAuthn PRF 时才会启用。
             </p>
           </div>
-          <div style="padding: 8px 0 20px">
-            <button class="btn btn-danger" type="button" id="btn-lock-now" style="width: 100%">立即锁定</button>
+          <div class="lock-wrap">
+            <button class="btn btn-danger btn-block" type="button" id="btn-lock-now">立即锁定</button>
           </div>
         </div>
       </section>

@@ -1,8 +1,8 @@
 /**
  * 本地加密核心。
- * - 应用密码不明文存盘
- * - 随机 DEK，用密码派生的 KEK（PBKDF2-SHA-256）包装
- * - 改密码只重新包装 DEK
+ * - 六层路径或原来的口令都不明文存盘
+ * - 随机 DEK，用口令派生的 KEK（PBKDF2-SHA-256）包装
+ * - 改路径只重新包装 DEK
  * - 视频与元数据使用 AES-256-GCM（分块）加密
  *
  * 仅使用 Web Crypto，可在浏览器与 Node 中运行。
@@ -64,6 +64,15 @@ export function assertPassword(password) {
   if (!p) throw new CryptoError("请输入密码。", "EMPTY_PASSWORD");
   if (p.length < MIN_PASSWORD_LENGTH) {
     throw new CryptoError(`密码至少需要 ${MIN_PASSWORD_LENGTH} 个字符。`, "WEAK_PASSWORD");
+  }
+  return p;
+}
+
+/** 文件夹路径固定为六位数字。KDF 迭代次数仍由调用方按 PBKDF2_ITERATIONS 使用。 */
+export function assertPin(password) {
+  const p = normalizePassword(password).trim();
+  if (!/^[0-9]{6}$/.test(p)) {
+    throw new CryptoError("路径需要连续六位数字。", "BAD_PIN");
   }
   return p;
 }
@@ -139,7 +148,7 @@ export function serializeVaultRecord(record) {
 }
 
 export async function createVaultRecord(password, options = {}) {
-  const pwd = assertPassword(password);
+  const pwd = options.pin ? assertPin(password) : assertPassword(password);
   const iterations = options.iterations ?? PBKDF2_ITERATIONS;
   const salt = options.salt ?? randomBytes(SALT_BYTES);
   const dekBytes = options.dekBytes ?? (await generateDEKBytes());
@@ -177,7 +186,7 @@ export async function unlockVault(record, password) {
  * 只重新包装 DEK，不重新加密任何视频。
  */
 export async function rewrapVault(dekBytes, newPassword, options = {}) {
-  const pwd = assertPassword(newPassword);
+  const pwd = options.pin ? assertPin(newPassword) : assertPassword(newPassword);
   const iterations = options.iterations ?? PBKDF2_ITERATIONS;
   const salt = randomBytes(SALT_BYTES);
   const kek = await deriveKEK(pwd, salt, iterations);

@@ -7,7 +7,7 @@
 import { bytesToBase64, base64ToBytes } from "./util.js";
 import { wrapDEK, unwrapDEK, CryptoError } from "./crypto.js";
 
-const RP_NAME = "私密播放器";
+const RP_NAME = "gitbb";
 const PRF_SALT_INFO = new TextEncoder().encode("private-player-prf-v1");
 
 function subtle() {
@@ -76,7 +76,7 @@ export async function enrollWebAuthnPrf(dekBytes) {
   const support = await detectWebAuthnPrf();
   if (support === "no") {
     throw new CryptoError(
-      "当前 Safari / 系统无法用面容 ID 通过安全方式解锁，请继续使用应用密码。",
+      "当前 Safari / 系统无法用面容 ID 通过安全方式打开，请继续使用六层路径。",
       "NO_PRF"
     );
   }
@@ -119,7 +119,7 @@ export async function enrollWebAuthnPrf(dekBytes) {
   }
   if (!prf) {
     throw new CryptoError(
-      "本次验证成功，但浏览器没有提供 PRF 密钥派生。为避免把密钥明文存放，已取消面容解锁。请继续使用应用密码。",
+      "本次验证成功，但浏览器没有提供 PRF 密钥派生。为避免把密钥明文存放，已取消面容打开。请继续使用六层路径。",
       "NO_PRF"
     );
   }
@@ -169,7 +169,7 @@ export async function unlockWithWebAuthnPrf(record) {
   const prf = await evaluatePrf(credentialId, prfSalt);
   if (!prf) {
     throw new CryptoError(
-      "面容或系统验证已完成，但没有得到可用的 PRF 密钥，无法安全解锁。请使用应用密码。",
+      "面容或系统验证已完成，但没有得到可用的 PRF 密钥，无法安全打开。请使用六层路径。",
       "NO_PRF"
     );
   }
@@ -179,7 +179,7 @@ export async function unlockWithWebAuthnPrf(record) {
     return await unwrapDEK(base64ToBytes(record.wrappedDEK), base64ToBytes(record.wrapIV), kek);
   } catch (err) {
     if (err instanceof CryptoError) throw err;
-    throw new CryptoError("面容解锁失败，请使用应用密码。", "PRF_UNLOCK_FAIL");
+    throw new CryptoError("面容打开失败，请使用六层路径。", "PRF_UNLOCK_FAIL");
   }
 }
 
@@ -190,5 +190,5 @@ export function describePrfSupport(flag) {
   if (flag === "unknown") {
     return "无法事先确认面容 ID 是否能安全派生密钥。只有登记时真正拿到 PRF 才会启用。";
   }
-  return "当前环境不能安全地用面容 ID 解锁（加密根仍是应用密码）。";
+  return "当前环境不能安全地用面容 ID 打开（加密根仍是六层路径或原来的口令）。";
 }

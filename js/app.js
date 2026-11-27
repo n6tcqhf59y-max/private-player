@@ -1,5 +1,4 @@
 import {
-  assertPassword,
   createVaultRecord,
   unlockVault,
   rewrapVault,
@@ -19,6 +18,9 @@ import {
   KEY_VAULT,
   KEY_CATALOG,
   KEY_WEBAUTHN,
+  KEY_RECOVERY,
+  KEY_PIN_FAILS,
+  KEY_RECOVERY_GUARD,
   writeEncryptedVideo,
   readEncryptedVideo,
   deleteEncryptedVideo,
@@ -31,7 +33,26 @@ import {
   saveSettings,
 } from "./storage.js";
 import { buildBackupBlob, parseBackupBlob, openBackupWithPassword } from "./backup.js";
-import { createPlayQueue } from "./queue.js";
+import { createPlayQueue, nextShuffleQueue } from "./queue.js";
+import {
+  PIN_DIGITS,
+  PIN_FAILS_BEFORE_RECOVERY,
+  advanceGate,
+  retreatGate,
+  countsAsPinAttempt,
+  notePinFailure,
+  notePinSuccess,
+} from "./pinflow.js";
+import {
+  normalizeAnswer,
+  assertAnswer,
+  assertQuestion,
+  createRecoveryRecord,
+  unlockRecovery,
+  assessRecoveryGuard,
+  registerRecoveryFailure,
+  clearRecoveryGuard,
+} from "./recovery.js";
 import {
   detectWebAuthnPrf,
   enrollWebAuthnPrf,
@@ -85,6 +106,12 @@ const state = {
   exportShareActive: false,
   exportGen: 0,
   sheetDismiss: null,
+  recoveryRecord: null,
+  pinFails: 0,
+  recoveryGuard: clearRecoveryGuard(),
+  pendingPin: null,
+  secretMode: null,
+  gate: { mode: "unlock", digits: "", first: "", notice: null },
 };
 
 function beginBusy() {
@@ -119,6 +146,7 @@ function asBytes(value) {
 }
 
 function showView(id) {
+  clearToast();
   for (const el of document.querySelectorAll(".view")) el.hidden = true;
   const view = $(id);
   if (view) view.hidden = false;
@@ -297,8 +325,13 @@ async function lock(_reason) {
   clearIdleTimer();
   closeOverlay();
   hideProgress();
-  $("unlock-pass").value = "";
-  showView("view-lock");
+  state.pendingPin = null;
+  state.gate = { mode: "unlock", digits: "", first: "", notice: null };
+  if ((state.pinFails || 0) >= PIN_FAILS_BEFORE_RECOVERY && state.recoveryRecord?.question) {
+    showSecret("recover");
+  } else {
+    showGate("unlock");
+  }
   updateFaceUnlockButton();
 }
 
@@ -339,19 +372,466 @@ async function unlockWithPassword(password) {
   const dekBytes = await unlockVault(state.vaultRecord, password);
   state.dekBytes = dekBytes;
   state.dekKey = await importDEK(dekBytes);
+  const cleared = notePinSuccess();
+  state.pinFails = cleared.fails;
+  state.recoveryGuard = clearRecoveryGuard();
+  await kvSet(KEY_PIN_FAILS, 0);
+  await kvSet(KEY_RECOVERY_GUARD, state.recoveryGuard);
   await afterUnlock();
 }
 
-async function setupPassword(password, confirm) {
-  if (password !== confirm) throw new CryptoError("两次输入的密码不一致。", "MISMATCH");
-  const { record, dekBytes } = await createVaultRecord(password);
+function showGate(mode) {
+  state.gate = { mode, digits: "", first: "", notice: null };
+  showView("view-gate");
+  renderGate();
+}
+
+function gateNoticeText() {
+  if (state.gate.notice === "mismatch") return "两次路径不一样，请重新选择。";
+  if (state.gate.notice === "denied") return "打不开这个文件夹。";
+  if (state.gate.digits) return "";
+  switch (state.gate.mode) {
+    case "setup-choose":
+      return "走进六层文件夹。这条路径以后用来打开 gitbb。";
+    case "setup-confirm":
+      return "再走一遍刚才的路径。";
+    case "reset-choose":
+    case "change-choose":
+      return "选一条新的六层路径。";
+    case "reset-confirm":
+    case "change-confirm":
+      return "再走一遍新路径。";
+    default:
+      return "";
+  }
+}
+
+function renderGate() {
+  const digits = state.gate.digits;
+  const title = $("gate-title");
+  const back = $("btn-gate-back");
+  const path = $("gate-path");
+  const hint = $("gate-hint");
+  if (!title || !path) return;
+  title.textContent = digits ? digits[digits.length - 1] : "gitbb";
+  const atConfirmStart =
+    !digits &&
+    (state.gate.mode === "setup-confirm" ||
+      state.gate.mode === "reset-confirm" ||
+      state.gate.mode === "change-confirm");
+  back.hidden = !digits && !atConfirmStart && state.gate.mode !== "change-choose" && state.gate.mode !== "reset-choose";
+  const parts = ["gitbb"];
+  for (const digit of digits) parts.push(digit);
+  path.textContent = parts.join("  /  ");
+  hint.textContent = gateNoticeText();
+  const browsingLocked = state.gate.mode === "unlock" || state.gate.mode === "setup-choose";
+  $("btn-gate-restore").hidden = !browsingLocked;
+  const legacy = $("btn-legacy-pass");
+  if (legacy) {
+    legacy.hidden = !(state.gate.mode === "unlock" && state.vaultRecord && !state.recoveryRecord);
+  }
+  updateFaceUnlockButton();
+}
+
+function ensureFolderGrid() {
+  const grid = $("gate-grid");
+  if (!grid || grid.childElementCount) return;
+  for (const digit of PIN_DIGITS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "folder-item";
+    btn.setAttribute("aria-label", `文件夹 ${digit}`);
+    const glyph = document.createElement("span");
+    glyph.className = `folder-glyph tone-${digit}`;
+    glyph.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "folder-name";
+    name.textContent = digit;
+    btn.append(glyph, name);
+    btn.addEventListener("click", () => onFolderDigit(digit));
+    grid.append(btn);
+  }
+}
+
+async function onFolderDigit(digit) {
+  if (state.busy || state.gate.hold) return;
+  const next = advanceGate(state.gate, digit);
+  state.gate = {
+    mode: next.mode,
+    digits: next.digits,
+    first: next.first,
+    notice: next.notice,
+    hold: false,
+  };
+  renderGate();
+  if (next.kind === "browsing" || next.kind === "need-confirm" || next.kind === "mismatch") return;
+  state.gate.hold = true;
+  try {
+    if (countsAsPinAttempt(next.kind)) {
+      await attemptUnlock(next.pin);
+      return;
+    }
+    if (next.kind === "submit-new-pin") {
+      await acceptNewPin(next.pin);
+    }
+  } finally {
+    if (state.gate) state.gate.hold = false;
+  }
+}
+
+async function attemptUnlock(pin) {
+  beginBusy();
+  try {
+    showProgress("正在打开", "", 0.45);
+    await unlockWithPassword(pin);
+    state.gate = { mode: "unlock", digits: "", first: "", notice: null };
+  } catch (err) {
+    hideProgress();
+    state.gate.digits = "";
+    state.gate.first = "";
+    if (err?.code === "BAD_PASSWORD" || err?.code === "BAD_VAULT") {
+      const result = notePinFailure(state.pinFails);
+      state.pinFails = result.fails;
+      await kvSet(KEY_PIN_FAILS, state.pinFails);
+      if (result.showRecovery && state.recoveryRecord?.question) {
+        showSecret("recover");
+        return;
+      }
+      state.gate.notice = "denied";
+      renderGate();
+    } else {
+      state.gate.notice = null;
+      renderGate();
+      toast(err.message || "打不开");
+    }
+  } finally {
+    hideProgress();
+    endBusy();
+  }
+}
+
+async function acceptNewPin(pin) {
+  const mode = state.gate.mode;
+  if (mode === "setup-confirm") {
+    state.pendingPin = pin;
+    showSecret("setup");
+    return;
+  }
+  if (mode === "reset-confirm") {
+    await finishPinReset(pin);
+    return;
+  }
+  if (mode === "change-confirm") {
+    if (!state.recoveryRecord) {
+      state.pendingPin = pin;
+      showSecret("migrate");
+      return;
+    }
+    await finishPinChange(pin);
+  }
+}
+
+function gateBack() {
+  if (state.busy) return;
+  const next = retreatGate(state.gate);
+  if (next.atRoot && state.gate.mode === "change-choose") {
+    showView("view-settings");
+    return;
+  }
+  if (next.atRoot && state.gate.mode === "reset-choose") {
+    dropKeys();
+    state.pendingPin = null;
+    showSecret("recover");
+    return;
+  }
+  state.gate = {
+    mode: next.mode,
+    digits: next.digits,
+    first: next.first,
+    notice: next.restarted ? null : state.gate.notice,
+  };
+  if (next.digits) state.gate.notice = null;
+  renderGate();
+}
+
+function showSecret(mode) {
+  state.secretMode = mode;
+  const question = $("secret-question");
+  const answer = $("secret-answer");
+  const answer2 = $("secret-answer2");
+  question.value = "";
+  answer.value = "";
+  answer2.value = "";
+  const defining = mode === "setup" || mode === "edit" || mode === "migrate";
+  $("field-secret-question").hidden = !defining;
+  $("field-secret-answer2").hidden = !defining;
+  $("secret-lockout").hidden = true;
+  $("btn-secret-submit").disabled = false;
+  answer.disabled = false;
+  if (mode === "setup" || mode === "migrate") {
+    $("secret-title").textContent = "留一个问题";
+    $("secret-lead").textContent = "忘记六层路径时，会用这个问题改一条新路径。答案不会明文保存。";
+    $("secret-hint").textContent =
+      "答案请只有你自己知道，不要太短，也不要写别人能猜到的词。保存时会去掉首尾空格。";
+    $("btn-secret-submit").textContent = "完成";
+  } else if (mode === "edit") {
+    $("secret-title").textContent = "更改问题";
+    question.value = state.recoveryRecord?.question || "";
+    $("secret-lead").textContent = "换一道只有你能回答的问题。答对才能在忘记路径后重设路径。";
+    $("secret-hint").textContent =
+      "答案请只有你自己知道，不要太短。保存时会去掉首尾空格。旧答案在保存后失效。";
+    $("btn-secret-submit").textContent = "保存";
+  } else {
+    $("secret-title").textContent = "gitbb";
+    $("secret-lead").textContent = state.recoveryRecord?.question || "";
+    $("secret-hint").textContent = "回答正确后可以重设六层路径。回答错误会限制尝试次数。";
+    $("btn-secret-submit").textContent = "继续";
+    refreshRecoveryLockout();
+  }
+  showView("view-secret");
+}
+
+function refreshRecoveryLockout() {
+  if (state.secretMode !== "recover") return;
+  const decision = assessRecoveryGuard(state.recoveryGuard, Date.now());
+  const note = $("secret-lockout");
+  const submit = $("btn-secret-submit");
+  const answer = $("secret-answer");
+  if (!decision.allowed) {
+    const mins = Math.max(1, Math.ceil((decision.retryAt - Date.now()) / 60000));
+    note.hidden = false;
+    note.textContent = `尝试次数过多，请约 ${mins} 分钟后再试。`;
+    submit.disabled = true;
+    answer.disabled = true;
+  } else {
+    note.hidden = true;
+    submit.disabled = false;
+    answer.disabled = false;
+  }
+}
+
+async function finishSetup(question, answer) {
+  const pin = state.pendingPin;
+  if (!pin) throw new CryptoError("请先走完六层路径。", "BAD_PIN");
+  showProgress("正在整理", "请稍等片刻", 0.35);
+  const { record, dekBytes } = await createVaultRecord(pin, { pin: true });
+  const recovery = await createRecoveryRecord(question, answer, dekBytes);
   await kvSet(KEY_VAULT, record);
+  try {
+    await kvSet(KEY_RECOVERY, recovery);
+  } catch (err) {
+    await kvDelete(KEY_VAULT);
+    throw err;
+  }
+  await kvSet(KEY_PIN_FAILS, 0);
+  await kvSet(KEY_RECOVERY_GUARD, clearRecoveryGuard());
   state.vaultRecord = record;
+  state.recoveryRecord = recovery;
+  state.pinFails = 0;
+  state.recoveryGuard = clearRecoveryGuard();
+  state.pendingPin = null;
   state.dekBytes = dekBytes;
   state.dekKey = await importDEK(dekBytes);
   state.catalog = emptyCatalog();
   await persistCatalog();
   await afterUnlock();
+}
+
+async function finishPinReset(pin) {
+  if (!state.dekBytes) {
+    showSecret("recover");
+    return;
+  }
+  beginBusy();
+  try {
+    showProgress("正在整理", "请稍等片刻", 0.5);
+    const record = await rewrapVault(state.dekBytes, pin, { pin: true });
+    await kvSet(KEY_VAULT, record);
+    await kvSet(KEY_PIN_FAILS, 0);
+    await kvSet(KEY_RECOVERY_GUARD, clearRecoveryGuard());
+    state.vaultRecord = record;
+    state.pinFails = 0;
+    state.recoveryGuard = clearRecoveryGuard();
+    state.pendingPin = null;
+    hideProgress();
+    await afterUnlock();
+    toast("已改用新的路径");
+  } catch (err) {
+    hideProgress();
+    toast(err.message || "没能改路径");
+  } finally {
+    endBusy();
+  }
+}
+
+async function finishPinChange(pin) {
+  beginBusy();
+  try {
+    showProgress("正在整理", "文件不会重新加密", 0.5);
+    const record = await rewrapVault(state.dekBytes, pin, { pin: true });
+    await kvSet(KEY_VAULT, record);
+    state.vaultRecord = record;
+    state.pendingPin = null;
+    hideProgress();
+    showView("view-settings");
+    toast("路径已更改，文件不必重新加密");
+  } catch (err) {
+    hideProgress();
+    toast(err.message || "没能改路径");
+  } finally {
+    endBusy();
+  }
+}
+
+async function finishQuestionChange(question, answer) {
+  beginBusy();
+  try {
+    showProgress("正在整理", "请稍等片刻", 0.5);
+    const recovery = await createRecoveryRecord(question, answer, state.dekBytes);
+    await kvSet(KEY_RECOVERY, recovery);
+    state.recoveryRecord = recovery;
+    state.recoveryGuard = clearRecoveryGuard();
+    await kvSet(KEY_RECOVERY_GUARD, state.recoveryGuard);
+    hideProgress();
+    showView("view-settings");
+    await refreshSettingsPane();
+    toast("问题已更新");
+  } catch (err) {
+    hideProgress();
+    toast(err.message || "没能保存问题");
+  } finally {
+    endBusy();
+  }
+}
+
+async function finishMigrate(question, answer) {
+  const pin = state.pendingPin;
+  if (!pin || !state.dekBytes) {
+    toast("请先走完六层路径");
+    return;
+  }
+  beginBusy();
+  try {
+    showProgress("正在整理", "请稍等片刻", 0.4);
+    const record = await rewrapVault(state.dekBytes, pin, { pin: true });
+    const recovery = await createRecoveryRecord(question, answer, state.dekBytes);
+    await kvSet(KEY_VAULT, record);
+    await kvSet(KEY_RECOVERY, recovery);
+    await kvSet(KEY_PIN_FAILS, 0);
+    await kvSet(KEY_RECOVERY_GUARD, clearRecoveryGuard());
+    state.vaultRecord = record;
+    state.recoveryRecord = recovery;
+    state.pinFails = 0;
+    state.recoveryGuard = clearRecoveryGuard();
+    state.pendingPin = null;
+    hideProgress();
+    showView("view-settings");
+    await refreshSettingsPane();
+    toast("以后用六层路径打开");
+  } catch (err) {
+    hideProgress();
+    toast(err.message || "没能保存");
+  } finally {
+    endBusy();
+  }
+}
+
+async function submitSecretForm(event) {
+  event.preventDefault();
+  if (state.busy) return;
+  const mode = state.secretMode;
+  if (mode === "recover") {
+    await submitRecoveryAnswer($("secret-answer").value);
+    return;
+  }
+  let question;
+  let answer;
+  try {
+    question = assertQuestion($("secret-question").value);
+    answer = assertAnswer($("secret-answer").value);
+  } catch (err) {
+    toast(err.message || "请检查问题和答案");
+    return;
+  }
+  if (answer !== normalizeAnswer($("secret-answer2").value)) {
+    toast("两次答案不一致");
+    return;
+  }
+  if (mode === "setup") {
+    beginBusy();
+    try {
+      await finishSetup(question, answer);
+    } catch (err) {
+      toast(err.message || "没能完成");
+    } finally {
+      hideProgress();
+      endBusy();
+    }
+    return;
+  }
+  if (mode === "edit") {
+    await finishQuestionChange(question, answer);
+    return;
+  }
+  if (mode === "migrate") {
+    await finishMigrate(question, answer);
+  }
+}
+
+async function submitRecoveryAnswer(raw) {
+  const decision = assessRecoveryGuard(state.recoveryGuard, Date.now());
+  if (!decision.allowed) {
+    refreshRecoveryLockout();
+    return;
+  }
+  if (!normalizeAnswer(raw)) {
+    toast("请填写答案");
+    return;
+  }
+  beginBusy();
+  try {
+    showProgress("正在打开", "", 0.5);
+    const dekBytes = await unlockRecovery(state.recoveryRecord, raw);
+    state.dekBytes = dekBytes;
+    state.dekKey = await importDEK(dekBytes);
+    state.recoveryGuard = clearRecoveryGuard();
+    await kvSet(KEY_RECOVERY_GUARD, state.recoveryGuard);
+    hideProgress();
+    $("secret-answer").value = "";
+    showGate("reset-choose");
+    toast("回答正确，请设定新的六层路径");
+  } catch (err) {
+    hideProgress();
+    $("secret-answer").value = "";
+    if (err?.code === "EMPTY_ANSWER") {
+      toast("请填写答案");
+      return;
+    }
+    state.recoveryGuard = registerRecoveryFailure(state.recoveryGuard, Date.now());
+    await kvSet(KEY_RECOVERY_GUARD, state.recoveryGuard);
+    refreshRecoveryLockout();
+    const stillOpen = assessRecoveryGuard(state.recoveryGuard, Date.now());
+    toast(stillOpen.allowed ? "回答不正确" : "尝试次数过多，请稍后再试");
+  } finally {
+    endBusy();
+  }
+}
+
+function secretBack() {
+  if (state.busy) return;
+  if (state.secretMode === "setup") {
+    state.pendingPin = null;
+    showGate("setup-choose");
+    return;
+  }
+  if (state.secretMode === "edit" || state.secretMode === "migrate") {
+    state.pendingPin = null;
+    showView("view-settings");
+    return;
+  }
+  state.gate = { mode: "unlock", digits: "", first: "", notice: null };
+  showView("view-gate");
+  renderGate();
 }
 
 function guessMime(name) {
@@ -458,12 +938,43 @@ async function loadThumbnails() {
   }
 }
 
+function fileGlyph() {
+  const ph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  ph.setAttribute("viewBox", "0 0 24 24");
+  ph.classList.add("ph-icon");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M4 7.5A2.5 2.5 0 0 1 6.5 5H10l2 2h5.5A2.5 2.5 0 0 1 20 9.5v7A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9z");
+  path.setAttribute("fill", "currentColor");
+  ph.append(path);
+  return ph;
+}
+
 function renderLibrary() {
   const empty = $("library-empty");
   const grid = $("library-grid");
   grid.replaceChildren();
   const videos = state.catalog.videos;
   empty.hidden = videos.length > 0;
+  if (videos.length) {
+    const shuffle = document.createElement("button");
+    shuffle.type = "button";
+    shuffle.className = "card shuffle-card";
+    const thumb = document.createElement("div");
+    thumb.className = "card-thumb";
+    thumb.append(fileGlyph());
+    const meta = document.createElement("div");
+    meta.className = "card-meta";
+    const title = document.createElement("div");
+    title.className = "card-title";
+    title.textContent = "随机";
+    const sub = document.createElement("div");
+    sub.className = "card-sub";
+    sub.textContent = `全部 ${videos.length} 个文件`;
+    meta.append(title, sub);
+    shuffle.append(thumb, meta);
+    shuffle.addEventListener("click", () => playFromLibrary(null, true));
+    grid.append(shuffle);
+  }
   for (const item of videos) {
     const card = document.createElement("button");
     card.type = "button";
@@ -477,14 +988,7 @@ function renderLibrary() {
       img.src = url;
       thumb.append(img);
     } else {
-      const ph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      ph.setAttribute("viewBox", "0 0 24 24");
-      ph.classList.add("ph-icon");
-      const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      p.setAttribute("d", "M8 5v14l11-7z");
-      p.setAttribute("fill", "currentColor");
-      ph.append(p);
-      thumb.append(ph);
+      thumb.append(fileGlyph());
     }
     if (item.duration) {
       const dur = document.createElement("span");
@@ -768,7 +1272,7 @@ function showReadyToSaveSheet(item, gen) {
   warn.textContent = PLAIN_EXPORT_WARNING;
   const note = document.createElement("p");
   note.textContent =
-    "点保存前如果切到别的应用，播放器会锁定并取消这次导出，不会删除加密副本。系统分享结束或开始下载，都不代表文件已经保存成功。";
+    "点保存前如果切到别的应用，gitbb 会锁定并取消这次导出，不会删除加密副本。系统分享结束或开始下载，都不代表文件已经保存成功。";
   wrap.append(lead, warn, note);
   openSheet({
     title: "请点保存",
@@ -918,10 +1422,10 @@ function askDeleteEncryptedCopy(item, gen) {
   const name = item.name || "未命名视频";
   const wrap = document.createElement("div");
   const lead = document.createElement("p");
-  lead.textContent = `你已确认「${name}」的未加密原视频保存成功。是否从播放器中删除加密副本？可以只导出、不删除。`;
+  lead.textContent = `你已确认「${name}」的未加密原视频保存成功。是否从 gitbb 中删除加密副本？可以只导出、不删除。`;
   wrap.append(lead);
   openSheet({
-    title: "删除播放器里的加密副本？",
+    title: "删除 gitbb 里的加密副本？",
     body: wrap,
     onDismiss: () => keepExportedCopy(gen),
     actions: [
@@ -950,7 +1454,7 @@ function keepExportedCopy(gen) {
   releasePlainFile(exp, { immediate: !exp.downloadTriggered });
   state.plainExport = null;
   state.exportGen += 1;
-  toast("已保留播放器中的加密副本");
+  toast("已保留 gitbb 中的加密副本");
 }
 
 async function finalizeExportDelete(item, gen) {
@@ -989,7 +1493,7 @@ function openExportHelp() {
 async function importFiles(fileList) {
   const files = [...fileList].filter(isVideoFile);
   if (!files.length) {
-    toast("没有选到可识别的视频文件");
+    toast("没有选到可识别的文件");
     return;
   }
   const large = files.filter((f) => f.size > LARGE_FILE_BYTES);
@@ -1064,7 +1568,7 @@ async function importFiles(fileList) {
       await persistCatalog();
     }
     renderLibrary();
-    toast(files.length === 1 ? "已导入 1 个视频" : `已导入 ${files.length} 个视频`);
+    toast(files.length === 1 ? "已放入 1 个文件" : `已放入 ${files.length} 个文件`);
   } catch (err) {
     console.error(err);
     toast(err.message || "导入失败，可能是存储空间不足");
@@ -1078,13 +1582,13 @@ async function importFiles(fileList) {
 async function playFromLibrary(startId, shuffle) {
   const ids = state.catalog.videos.map((v) => v.id);
   if (!ids.length) {
-    toast("资料库是空的");
+    toast("这个文件夹是空的");
     return;
   }
   state.shuffleMode = Boolean(shuffle);
   let startIndex = 0;
   if (shuffle) {
-    state.playQueue = createPlayQueue(ids, { shuffle: true });
+    state.playQueue = nextShuffleQueue(ids, null);
   } else {
     startIndex = Math.max(0, ids.indexOf(startId));
     state.playQueue = createPlayQueue(ids, { shuffle: false, startIndex });
@@ -1107,14 +1611,14 @@ async function loadCurrentVideo(autoplay) {
   const video = $("playerVideo");
   stopSrcOnly();
   $("playerTitle").textContent = item.name || "未命名视频";
-  showProgress("正在解密", item.name, 0);
+  showProgress("正在打开", item.name, 0);
   try {
     const enc = await readEncryptedVideo(item.id);
     if (!enc) throw new Error("加密文件丢失，可能已被系统清理。请从备份恢复。");
     const plainBlob = await decryptPvidBlob(state.dekKey, enc, {
       mime: item.mime || guessMime(item.name),
       onProgress: (done, total) => {
-        showProgress("正在解密", `${item.name}（${formatBytes(done)} / ${formatBytes(total)}）`, total ? done / total : 0);
+        showProgress("正在打开", `${item.name}（${formatBytes(done)} / ${formatBytes(total)}）`, total ? done / total : 0);
       },
     });
     state.videoObjectUrl = URL.createObjectURL(plainBlob);
@@ -1196,7 +1700,7 @@ function closePlayer() {
 
 async function exportBackup() {
   if (!state.catalog.videos.length) {
-    const ok = await confirmDialog("资料库是空的", "仍要导出一份只有密钥和空目录的备份吗？", {
+    const ok = await confirmDialog("文件夹是空的", "仍要导出一份只有密钥和空目录的备份吗？", {
       confirmLabel: "导出",
     });
     if (!ok) return;
@@ -1233,8 +1737,9 @@ async function exportBackup() {
       dekKey: state.dekKey,
       catalog: state.catalog,
       items,
+      recovery: state.recoveryRecord,
     });
-    const name = `私密播放器备份-${formatDateTime()}.ppb`;
+    const name = `gitbb-${formatDateTime()}.ppb`;
     const file = new File([blob], name, { type: "application/octet-stream" });
     hideProgress();
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1287,7 +1792,7 @@ function passwordFields(ids, labels) {
 }
 
 function askBackupAndRestore(mode) {
-  const { wrap, inputs } = passwordFields(["restore-pass"], ["备份文件的应用密码"]);
+  const { wrap, inputs } = passwordFields(["restore-pass"], ["备份口令（六位路径或原来的口令）"]);
   const hint = document.createElement("p");
   hint.className = "hint";
   hint.textContent =
@@ -1306,7 +1811,7 @@ function askBackupAndRestore(mode) {
         onClick: () => {
           const password = inputs[0].value;
           if (!password) {
-            toast("请输入备份密码");
+            toast("请输入备份口令");
             return;
           }
           state.pendingRestore = { mode, password };
@@ -1332,6 +1837,19 @@ async function handleBackupFile(file) {
     if (pending.mode === "fresh" && !state.unlocked) {
       await kvSet(KEY_VAULT, opened.vaultRecord);
       state.vaultRecord = opened.vaultRecord;
+      const restoredRecovery = parsed.header?.recovery;
+      if (restoredRecovery?.wrappedDEK && restoredRecovery?.question) {
+        const recovery = { version: 1, ...restoredRecovery };
+        await kvSet(KEY_RECOVERY, recovery);
+        state.recoveryRecord = recovery;
+      } else {
+        await kvDelete(KEY_RECOVERY);
+        state.recoveryRecord = null;
+      }
+      state.pinFails = 0;
+      state.recoveryGuard = clearRecoveryGuard();
+      await kvSet(KEY_PIN_FAILS, 0);
+      await kvSet(KEY_RECOVERY_GUARD, state.recoveryGuard);
       let i = 0;
       const total = parsed.items.length || 1;
       for (const item of parsed.items) {
@@ -1347,7 +1865,7 @@ async function handleBackupFile(file) {
       state.dekKey = opened.dekKey;
       hideProgress();
       await afterUnlock();
-      toast(`已恢复 ${state.catalog.videos.length} 个视频`);
+      toast(`已恢复 ${state.catalog.videos.length} 个文件`);
       return;
     }
     if (!state.unlocked) {
@@ -1405,10 +1923,10 @@ async function handleBackupFile(file) {
     await persistCatalog();
     renderLibrary();
     hideProgress();
-    toast(`已合并 ${added} 个视频`);
+    toast(`已合并 ${added} 个文件`);
   } catch (err) {
     hideProgress();
-    toast(err.message || "恢复失败，请检查密码与文件");
+    toast(err.message || "恢复失败，请检查口令与文件");
   } finally {
     $("file-backup").value = "";
     endBusy();
@@ -1416,33 +1934,43 @@ async function handleBackupFile(file) {
 }
 
 function openChangePassword() {
-  const { wrap, inputs } = passwordFields(
-    ["old-pass", "new-pass", "new-pass2"],
-    ["当前密码", "新密码（至少 8 个字符）", "再输入一次新密码"]
-  );
+  if (!state.unlocked || !state.dekBytes) {
+    toast("请先打开文件夹");
+    return;
+  }
+  showGate("change-choose");
+}
+
+function openLegacyPass() {
+  const { wrap, inputs } = passwordFields(["legacy-pass"], ["原来的口令"]);
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = "这是改版前留下的口令。打开后可以在设置里改成六层路径，并留下找回问题。";
+  wrap.append(hint);
   openSheet({
-    title: "更改应用密码",
+    title: "用原来的口令打开",
     body: wrap,
     actions: [
       {
-        label: "保存",
+        label: "打开",
         className: "btn-primary",
         keepOpen: true,
         onClick: async () => {
+          const value = inputs[0].value;
+          if (!value) {
+            toast("请填写口令");
+            return;
+          }
+          beginBusy();
           try {
-            await unlockVault(state.vaultRecord, inputs[0].value);
-            if (inputs[1].value !== inputs[2].value) {
-              toast("两次新密码不一致");
-              return;
-            }
-            assertPassword(inputs[1].value);
-            const record = await rewrapVault(state.dekBytes, inputs[1].value);
-            await kvSet(KEY_VAULT, record);
-            state.vaultRecord = record;
+            showProgress("正在打开", "", 0.5);
+            await unlockWithPassword(value);
             closeOverlay();
-            toast("密码已更改，视频不必重新加密");
           } catch (err) {
-            toast(err.message || "更改失败");
+            toast(err?.code === "BAD_PASSWORD" ? "打不开" : err.message || "打不开");
+          } finally {
+            hideProgress();
+            endBusy();
           }
         },
       },
@@ -1453,7 +1981,9 @@ function openChangePassword() {
 
 function updateFaceUnlockButton() {
   const btn = $("btn-face");
-  btn.hidden = !(state.webauthn && state.webauthn.wrappedDEK);
+  if (!btn) return;
+  const onLock = state.gate?.mode === "unlock" && state.currentView === "view-gate";
+  btn.hidden = !(onLock && state.webauthn && state.webauthn.wrappedDEK);
 }
 
 async function refreshSettingsPane() {
@@ -1471,8 +2001,12 @@ async function refreshSettingsPane() {
   const enrolled = Boolean(state.webauthn && state.webauthn.wrappedDEK);
   $("btn-enroll-face").hidden = enrolled || state.prfSupport === "no";
   $("btn-remove-face").hidden = !enrolled;
+  const changeLabel = $("btn-change-pass")?.querySelector(".label");
+  if (changeLabel) changeLabel.textContent = state.recoveryRecord ? "更改六层路径" : "改成六层路径";
+  const secretBtn = $("btn-change-secret");
+  if (secretBtn) secretBtn.hidden = !state.recoveryRecord;
   $("face-note").textContent = enrolled
-    ? "已启用基于 WebAuthn PRF 的面容解锁。加密根仍是应用密码；面容只用于安全派生解包密钥，不会把密钥明文存放在磁盘上。"
+    ? "已启用基于 WebAuthn PRF 的面容打开。加密根仍是六层路径；面容只用于安全派生解包密钥，不会把密钥明文存放在磁盘上。"
     : describePrfSupport(state.prfSupport);
 }
 
@@ -1483,7 +2017,7 @@ async function enrollFace() {
     await kvSet(KEY_WEBAUTHN, rec);
     state.webauthn = rec;
     await refreshSettingsPane();
-    toast("已启用面容 ID 解锁");
+    toast("已启用面容 ID");
   } catch (err) {
     if (err?.name === "NotAllowedError") {
       toast("已取消或系统不允许");
@@ -1496,7 +2030,7 @@ async function enrollFace() {
 }
 
 async function removeFace() {
-  const ok = await confirmDialog("关闭面容 ID 解锁？", "之后只能使用应用密码解锁。", {
+  const ok = await confirmDialog("关闭面容 ID？", "之后用六层路径打开。", {
     confirmLabel: "关闭",
     danger: true,
   });
@@ -1545,36 +2079,14 @@ function openLocalFilePicker(input) {
 }
 
 function bindEvents() {
-  $("form-setup").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    beginBusy();
-    try {
-      showProgress("正在创建密钥", "只需这一次", 0.4);
-      await setupPassword($("setup-pass").value, $("setup-pass2").value);
-      $("setup-pass").value = "";
-      $("setup-pass2").value = "";
-    } catch (err) {
-      toast(err.message || "设置失败");
-    } finally {
-      hideProgress();
-      endBusy();
-    }
-  });
-
-  $("form-unlock").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    beginBusy();
-    try {
-      showProgress("正在解锁", "派生密钥不会离开本机", 0.5);
-      await unlockWithPassword($("unlock-pass").value);
-      $("unlock-pass").value = "";
-    } catch (err) {
-      toast(err.message || "解锁失败");
-    } finally {
-      hideProgress();
-      endBusy();
-    }
-  });
+  ensureFolderGrid();
+  $("btn-gate-back").addEventListener("click", gateBack);
+  $("btn-gate-restore").addEventListener("click", () =>
+    askBackupAndRestore(state.unlocked ? "merge" : "fresh")
+  );
+  $("btn-legacy-pass").addEventListener("click", openLegacyPass);
+  $("form-secret").addEventListener("submit", submitSecretForm);
+  $("btn-secret-back").addEventListener("click", secretBack);
 
   $("btn-face").addEventListener("click", async () => {
     beginBusy();
@@ -1583,20 +2095,20 @@ function bindEvents() {
       const dekBytes = await unlockWithWebAuthnPrf(state.webauthn);
       state.dekBytes = dekBytes;
       state.dekKey = await importDEK(dekBytes);
+      state.pinFails = 0;
+      state.recoveryGuard = clearRecoveryGuard();
+      await kvSet(KEY_PIN_FAILS, 0);
+      await kvSet(KEY_RECOVERY_GUARD, state.recoveryGuard);
       await afterUnlock();
     } catch (err) {
       if (err?.name === "NotAllowedError") toast("已取消");
-      else toast(err.message || "面容解锁失败，请使用应用密码");
+      else toast(err.message || "面容打开失败，请使用六层路径");
     } finally {
       hideProgress();
       endBusy();
     }
   });
 
-  $("btn-setup-restore").addEventListener("click", () => askBackupAndRestore("fresh"));
-  $("btn-lock-restore").addEventListener("click", () =>
-    askBackupAndRestore(state.unlocked ? "merge" : "fresh")
-  );
   $("btn-import").addEventListener("click", () => openLocalFilePicker($("file-import")));
   $("btn-import-empty").addEventListener("click", () => openLocalFilePicker($("file-import")));
   $("file-import").addEventListener("change", (ev) => {
@@ -1621,6 +2133,10 @@ function bindEvents() {
     bumpActivity();
   });
   $("btn-change-pass").addEventListener("click", openChangePassword);
+  $("btn-change-secret").addEventListener("click", () => {
+    if (!state.unlocked || !state.dekBytes) return;
+    showSecret("edit");
+  });
   $("btn-enroll-face").addEventListener("click", enrollFace);
   $("btn-remove-face").addEventListener("click", removeFace);
   $("btn-export").addEventListener("click", exportBackup);
@@ -1676,12 +2192,21 @@ function bindEvents() {
   video.addEventListener("timeupdate", updateTimeUi);
   video.addEventListener("loadedmetadata", updateTimeUi);
   video.addEventListener("ended", async () => {
-    if (state.playQueue?.hasNext()) await goRelative(1);
-    else {
-      setPlayingUi(false);
-      showPlayerControls(true);
-      toast("已播完当前队列");
+    if (state.playQueue?.hasNext()) {
+      await goRelative(1);
+      return;
     }
+    const ids = state.catalog.videos.map((item) => item.id);
+    if (state.shuffleMode && ids.length > 1) {
+      const last = state.playQueue?.current;
+      state.playQueue = nextShuffleQueue(ids, last);
+      toast("换了一个顺序，继续");
+      await loadCurrentVideo(true);
+      return;
+    }
+    setPlayingUi(false);
+    showPlayerControls(true);
+    toast("已经看完");
   });
   $("playerStage").addEventListener("click", (ev) => {
     if (ev.target.closest(".player-top, .player-bottom, .btn, input")) return;
@@ -1694,6 +2219,17 @@ function bindEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden && state.settings.lockOnBackground !== false) {
       if (canAutoLock()) lock("进入后台");
+      else if (!state.unlocked && (state.dekBytes || state.pendingPin)) {
+        dropKeys();
+        state.pendingPin = null;
+        if (state.vaultRecord && (state.pinFails || 0) >= PIN_FAILS_BEFORE_RECOVERY && state.recoveryRecord?.question) {
+          showSecret("recover");
+        } else if (!state.vaultRecord) {
+          showGate("setup-choose");
+        } else {
+          showGate("unlock");
+        }
+      }
     } else if (!document.hidden && state.currentView === "view-player" && !$("playerVideo").paused) {
       tryWakeLock();
     }
@@ -1746,17 +2282,22 @@ async function boot() {
   registerSw();
   state.settings = await loadSettings();
   state.vaultRecord = (await kvGet(KEY_VAULT)) || null;
+  state.recoveryRecord = (await kvGet(KEY_RECOVERY)) || null;
   state.webauthn = (await kvGet(KEY_WEBAUTHN)) || null;
+  const storedFails = await kvGet(KEY_PIN_FAILS);
+  state.pinFails = Number(storedFails) || 0;
+  state.recoveryGuard = (await kvGet(KEY_RECOVERY_GUARD)) || clearRecoveryGuard();
   try {
     state.prfSupport = await detectWebAuthnPrf();
   } catch {
     state.prfSupport = "no";
   }
   if (!state.vaultRecord) {
-    showView("view-setup");
+    showGate("setup-choose");
+  } else if (state.pinFails >= PIN_FAILS_BEFORE_RECOVERY && state.recoveryRecord?.question) {
+    showSecret("recover");
   } else {
-    showView("view-lock");
-    updateFaceUnlockButton();
+    showGate("unlock");
   }
 }
 

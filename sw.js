@@ -1,6 +1,6 @@
-/* 只缓存播放器程序文件，绝不缓存用户视频。 */
+/* 只缓存程序文件，绝不缓存用户文件。 */
 
-const CACHE = "private-player-v2";
+const CACHE = "gitbb-v3";
 const ASSETS = [
   "./",
   "./index.html",
@@ -14,6 +14,8 @@ const ASSETS = [
   "./js/storage.js",
   "./js/webauthn.js",
   "./js/export.js",
+  "./js/pinflow.js",
+  "./js/recovery.js",
   "./icons/icon-180.png",
   "./icons/icon-192.png",
   "./icons/icon-512.png",

@@ -12,6 +12,9 @@ export const KEY_VAULT = "vault";
 export const KEY_CATALOG = "catalog";
 export const KEY_SETTINGS = "settings";
 export const KEY_WEBAUTHN = "webauthn";
+export const KEY_RECOVERY = "recovery";
+export const KEY_PIN_FAILS = "pinFails";
+export const KEY_RECOVERY_GUARD = "recoveryGuard";
 
 let dbPromise = null;
 
