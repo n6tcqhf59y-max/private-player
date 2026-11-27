@@ -1,13 +1,13 @@
 {
-  "name": "私密播放器",
-  "short_name": "私密播放器",
-  "description": "仅在本机加密存放与播放私密视频",
+  "name": "gitbb",
+  "short_name": "gitbb",
+  "description": "本机文件夹",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#07080a",
-  "theme_color": "#07080a",
+  "background_color": "#243044",
+  "theme_color": "#243044",
   "lang": "zh-CN",
   "dir": "ltr",
   "icons": [

@@ -1,6 +1,6 @@
 /**
  * 加密备份容器（.ppb）。
- * 仍需应用密码才能恢复。不包含任何自动上传逻辑。
+ * 仍需当时的路径或口令才能恢复。不包含任何自动上传逻辑。
  *
  * 格式（小端）：
  *   magic "PPB1" (4)
@@ -51,7 +51,7 @@ function headerToVaultRecord(header) {
   };
 }
 
-export function buildBackupHeader({ vaultRecord, items, createdAt, catalog }) {
+export function buildBackupHeader({ vaultRecord, items, createdAt, catalog, recovery }) {
   return {
     app: "iphone-private-player",
     createdAt: createdAt || new Date().toISOString(),
@@ -62,6 +62,16 @@ export function buildBackupHeader({ vaultRecord, items, createdAt, catalog }) {
       wrapIV: vaultRecord.wrapIV,
       wrappedDEK: vaultRecord.wrappedDEK,
     },
+    recovery: recovery?.wrappedDEK
+      ? {
+          kdf: recovery.kdf,
+          iterations: recovery.iterations,
+          salt: recovery.salt,
+          wrapIV: recovery.wrapIV,
+          wrappedDEK: recovery.wrappedDEK,
+          question: recovery.question,
+        }
+      : undefined,
     catalog: catalog ? { encoding: "aes-256-gcm" } : undefined,
     items: items.map((it) => ({
       id: it.id,
@@ -72,7 +82,7 @@ export function buildBackupHeader({ vaultRecord, items, createdAt, catalog }) {
   };
 }
 
-export async function buildBackupBlob({ vaultRecord, dekKey, catalog, items }) {
+export async function buildBackupBlob({ vaultRecord, dekKey, catalog, items, recovery }) {
   if (!vaultRecord || !dekKey) {
     throw new BackupError("无法在未解锁时导出备份。", "LOCKED");
   }
@@ -96,6 +106,7 @@ export async function buildBackupBlob({ vaultRecord, dekKey, catalog, items }) {
     vaultRecord,
     items: normalized,
     catalog: true,
+    recovery,
   });
   const headerBytes = new TextEncoder().encode(JSON.stringify(header));
   const parts = [
@@ -125,7 +136,7 @@ export function parseBackupPrefixAndHeader(bytes) {
   }
   const magic = readAscii(data, 0, 4);
   if (magic !== BACKUP_MAGIC) {
-    throw new BackupError("不是有效的私密播放器备份文件。", "BAD_BACKUP");
+    throw new BackupError("不是有效的 gitbb 备份文件。", "BAD_BACKUP");
   }
   const version = readU16(data, 4);
   if (version !== BACKUP_VERSION) {
