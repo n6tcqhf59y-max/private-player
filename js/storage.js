@@ -245,7 +245,7 @@ export async function storageEstimate() {
 
 export function defaultSettings() {
   return {
-    autoLockMs: 2 * 60 * 1000,
+    autoLockMs: 10 * 60 * 1000,
     lockOnBackground: true,
   };
 }

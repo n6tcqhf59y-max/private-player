@@ -68,6 +68,7 @@ import {
 } from "./util.js";
 import {
   EXPORT_HELP_PARAGRAPHS,
+  EXPORT_REMOVE_NOTE,
   PLAIN_EXPORT_WARNING,
   applyExportAction,
   createExportSession,
@@ -76,7 +77,18 @@ import {
   exportFileName,
   plainUrlRevokeDelayMs,
   shouldSuppressAutoLock,
+  uniqueExportIds,
 } from "./export.js";
+import { IDLE_LOCK_MS, shouldArmIdleLock, shouldLockOnBackground } from "./lock-policy.js";
+import {
+  RATE_PRESETS,
+  SKIP_SECONDS,
+  clampRate,
+  formatRate,
+  frameFit,
+  fullscreenStrategy,
+  skipTime,
+} from "./playback.js";
 
 const LARGE_FILE_BYTES = 400 * 1024 * 1024;
 const HIDE_CONTROLS_MS = 3500;
@@ -88,7 +100,7 @@ const state = {
   dekBytes: null,
   dekKey: null,
   catalog: emptyCatalog(),
-  settings: { autoLockMs: 120000, lockOnBackground: true },
+  settings: { autoLockMs: IDLE_LOCK_MS, lockOnBackground: true },
   webauthn: null,
   prfSupport: "no",
   unlocked: false,
@@ -106,6 +118,10 @@ const state = {
   exportShareActive: false,
   exportGen: 0,
   sheetDismiss: null,
+  selecting: false,
+  selected: new Set(),
+  exportBatch: null,
+  playbackRate: 1,
   recoveryRecord: null,
   pinFails: 0,
   recoveryGuard: clearRecoveryGuard(),
@@ -301,16 +317,25 @@ function clearIdleTimer() {
   }
 }
 
+function playbackFlags() {
+  const playing = state.currentView === "view-player" && !$("playerVideo").paused;
+  return {
+    unlocked: state.unlocked,
+    shareActive: state.exportShareActive,
+    busy: state.busy,
+    lockOnBackground: state.settings.lockOnBackground !== false,
+    view: playing ? "player" : "other",
+    paused: !playing,
+  };
+}
+
 function bumpActivity() {
   if (!state.unlocked) return;
   clearIdleTimer();
-  const ms = Number(state.settings.autoLockMs) || 0;
-  if (ms <= 0) return;
-  const playing = state.currentView === "view-player" && !$("playerVideo").paused;
-  if (playing) return;
+  if (!shouldArmIdleLock(playbackFlags())) return;
   state.idleTimer = setTimeout(() => {
-    if (canAutoLock()) lock("闲置超时");
-  }, ms);
+    if (canAutoLock() && shouldArmIdleLock(playbackFlags())) lock("闲置超时");
+  }, IDLE_LOCK_MS);
 }
 
 async function lock(_reason) {
@@ -955,7 +980,7 @@ function renderLibrary() {
   grid.replaceChildren();
   const videos = state.catalog.videos;
   empty.hidden = videos.length > 0;
-  if (videos.length) {
+  if (videos.length && !state.selecting) {
     const shuffle = document.createElement("button");
     shuffle.type = "button";
     shuffle.className = "card shuffle-card";
@@ -1016,8 +1041,26 @@ function renderLibrary() {
     sub.className = "card-sub";
     sub.textContent = formatBytes(item.size);
     meta.append(title, sub);
+    if (state.selecting) {
+      card.classList.toggle("is-selected", state.selected.has(item.id));
+      const mark = document.createElement("span");
+      mark.className = "select-mark";
+      mark.textContent = state.selected.has(item.id) ? "✓" : "";
+      thumb.append(mark);
+    }
     card.append(thumb, meta);
-    card.addEventListener("click", () => playFromLibrary(item.id, false));
+    card.addEventListener("click", () => {
+      if (state.selecting) {
+        if (state.selected.has(item.id)) state.selected.delete(item.id);
+        else state.selected.add(item.id);
+        card.classList.toggle("is-selected", state.selected.has(item.id));
+        const mark = card.querySelector(".select-mark");
+        if (mark) mark.textContent = state.selected.has(item.id) ? "✓" : "";
+        updateSelectBar();
+        return;
+      }
+      playFromLibrary(item.id, false);
+    });
     grid.append(card);
   }
 }
@@ -1056,6 +1099,7 @@ function abortPlainExport(reason, { silent = false } = {}) {
   state.exportGen += 1;
   state.plainExport = null;
   state.exportShareActive = false;
+  state.exportBatch = null;
   if (exp) {
     const result = applyExportAction(exp.session, { type: reason });
     if (result.deleteEncryptedCopy) {
@@ -1086,21 +1130,54 @@ function waitUntilVisible(timeoutMs) {
   });
 }
 
-function plainExportWarningBody(item) {
-  const name = item.name || "未命名视频";
+function plainExportWarningBody(items) {
+  const list = Array.isArray(items) ? items : [items];
+  const names = list.map((item) => item.name || "未命名视频").join("、");
   const wrap = document.createElement("div");
   const lead = document.createElement("p");
-  lead.textContent = `将只在这台设备上把「${name}」解密成原视频，再交给系统分享，由你保存到「文件」、相册或你自己的网盘。不会上传到开发者的服务器。`;
+  lead.textContent =
+    list.length > 1
+      ? `将只在这台设备上解密这 ${list.length} 个文件（${names}），再逐个交给系统分享。不会上传到开发者的服务器，也不能直接写回原来的相册或文件夹。`
+      : `将只在这台设备上把「${names}」解密成原视频，再交给系统分享。不会上传到开发者的服务器，也不能直接写回原来的相册或文件夹。`;
   const warn = document.createElement("p");
   warn.className = "alert alert-danger";
   warn.textContent = PLAIN_EXPORT_WARNING;
-  wrap.append(lead, warn);
-  if (item.size > LARGE_FILE_BYTES) {
+  const remove = document.createElement("p");
+  remove.className = "alert alert-danger";
+  remove.textContent = EXPORT_REMOVE_NOTE;
+  wrap.append(lead, warn, remove);
+  const large = list.filter((item) => item.size > LARGE_FILE_BYTES);
+  if (large.length) {
     const big = document.createElement("p");
-    big.textContent = `这个文件约 ${formatBytes(item.size)}，解密时会占用较多内存，iPhone 可能内存不足。`;
+    big.textContent = `${large.map((item) => item.name || "未命名视频").join("、")} 体积较大，解密时会占用较多内存，iPhone 可能内存不足。`;
     wrap.append(big);
   }
   return wrap;
+}
+
+function updateSelectBar() {
+  const bar = $("select-bar");
+  const count = $("select-count");
+  const button = $("btn-select");
+  if (!bar || !count || !button) return;
+  bar.hidden = !state.selecting;
+  count.textContent = `已选 ${state.selected.size}`;
+  button.textContent = state.selecting ? "取消" : "选择";
+  const exportBtn = $("btn-export-selected");
+  if (exportBtn) exportBtn.disabled = state.selected.size === 0;
+}
+
+function exitSelectMode() {
+  state.selecting = false;
+  state.selected.clear();
+  updateSelectBar();
+  if (state.unlocked) renderLibrary();
+}
+
+function exportPositionLabel() {
+  const batch = state.exportBatch;
+  if (!batch || batch.ids.length < 2) return "";
+  return `第 ${batch.index + 1} / ${batch.ids.length} 个。`;
 }
 
 function confirmDelete(item) {
@@ -1110,7 +1187,7 @@ function confirmDelete(item) {
   lead.textContent = `将从本机删除「${name}」。删除后无法恢复，除非你有备份。`;
   const warn = document.createElement("p");
   warn.className = "alert alert-danger";
-  warn.textContent = `${PLAIN_EXPORT_WARNING}也可以先解密导出，再决定是否删除。`;
+  warn.textContent = `${PLAIN_EXPORT_WARNING}${EXPORT_REMOVE_NOTE}`;
   wrap.append(lead, warn);
   openSheet({
     title: "删除这部视频？",
@@ -1156,7 +1233,9 @@ async function performDelete(item, cause) {
     state.catalog.videos = state.catalog.videos.filter((video) => video.id !== item.id);
     await persistCatalog();
     renderLibrary();
-    toast("已删除");
+    if (cause !== "export" || !state.exportBatch || state.exportBatch.ids.length < 2) {
+      toast(cause === "export" ? "已从 gitbb 移除" : "已删除");
+    }
     return true;
   } catch (err) {
     toast(err?.message || "删除失败，加密副本仍保留");
@@ -1166,12 +1245,51 @@ async function performDelete(item, cause) {
   }
 }
 
-function startPlainExport(item) {
+function startPlainExport(items) {
+  const incoming = Array.isArray(items) ? items : [items];
+  const ids = uniqueExportIds(incoming.map((item) => item?.id));
+  const resolved = ids
+    .map((id) => state.catalog.videos.find((video) => video.id === id))
+    .filter(Boolean);
+  if (!resolved.length) return;
   if (!state.unlocked || !state.dekKey) {
-    toast("应用已锁定，未删除加密副本");
+    toast("应用已锁定，未移除加密副本");
     return;
   }
   if (state.plainExport) abortPlainExport("cancel", { silent: true });
+  state.exportBatch = { ids: resolved.map((item) => item.id), index: 0 };
+  openSheet({
+    title: resolved.length > 1 ? `导出这 ${resolved.length} 个未加密原视频？` : "导出未加密原视频？",
+    body: plainExportWarningBody(resolved),
+    onDismiss: () => {
+      state.exportBatch = null;
+    },
+    actions: [
+      {
+        label: "开始导出",
+        className: "btn-primary",
+        onClick: () => {
+          exitSelectMode();
+          const first = state.catalog.videos.find((video) => video.id === state.exportBatch?.ids[0]);
+          if (!first) {
+            state.exportBatch = null;
+            return;
+          }
+          armExportItem(first);
+        },
+      },
+      {
+        label: "取消",
+        className: "btn-ghost",
+        onClick: () => {
+          state.exportBatch = null;
+        },
+      },
+    ],
+  });
+}
+
+function armExportItem(item) {
   state.exportGen += 1;
   const gen = state.exportGen;
   state.plainExport = {
@@ -1183,25 +1301,7 @@ function startPlainExport(item) {
     sharing: false,
     downloadTriggered: false,
   };
-  openSheet({
-    title: "导出未加密原视频？",
-    body: plainExportWarningBody(item),
-    onDismiss: () => {
-      if (state.plainExport?.gen === gen) abortPlainExport("cancel");
-    },
-    actions: [
-      {
-        label: "开始解密",
-        className: "btn-primary",
-        onClick: () => decryptForExport(item, gen),
-      },
-      {
-        label: "取消",
-        className: "btn-ghost",
-        onClick: () => abortPlainExport("cancel"),
-      },
-    ],
-  });
+  decryptForExport(item, gen);
 }
 
 async function decryptForExport(item, gen) {
@@ -1266,14 +1366,11 @@ function showReadyToSaveSheet(item, gen) {
   if (!exp || exp.gen !== gen || !exp.file) return;
   const wrap = document.createElement("div");
   const lead = document.createElement("p");
-  lead.textContent = `「${exp.file.name}」已在本机解密，尚未离开这台设备。请点「保存到系统…」，用系统分享保存到「文件」、相册或你的网盘。`;
+  lead.textContent = `${exportPositionLabel()}「${exp.file.name}」已在本机解密。请点「保存到系统…」。网页应用不能直接写回相册，需要你在系统分享里自己保存。`;
   const warn = document.createElement("p");
   warn.className = "alert alert-danger";
-  warn.textContent = PLAIN_EXPORT_WARNING;
-  const note = document.createElement("p");
-  note.textContent =
-    "点保存前如果切到别的应用，gitbb 会锁定并取消这次导出，不会删除加密副本。系统分享结束或开始下载，都不代表文件已经保存成功。";
-  wrap.append(lead, warn, note);
+  warn.textContent = `${PLAIN_EXPORT_WARNING}${EXPORT_REMOVE_NOTE}`;
+  wrap.append(lead, warn);
   openSheet({
     title: "请点保存",
     body: wrap,
@@ -1344,136 +1441,55 @@ async function handoffPlainExport(item, gen) {
   } catch (err) {
     failed = err;
   }
-  const visible = failed ? true : await waitUntilVisible(4000);
   exp.sharing = false;
   state.exportShareActive = false;
   endBusy();
   if (!exportStillCurrent(gen)) return;
   if (failed) {
     if (failed.name === "AbortError") {
-      abortPlainExport("share-aborted");
+      outcome = "share-aborted";
+    } else {
+      toast("系统分享没有打开，请再点一次。加密副本仍保留");
       return;
     }
-    toast("系统分享没有完成，请再点一次保存。未删除加密副本");
-    return;
-  }
-  if (!visible) {
-    await lock("分享后仍在后台");
-    return;
   }
   const stepped = applyExportAction(exp.session, { type: outcome });
-  if (stepped.rejected || stepped.deleteEncryptedCopy || deletionAllowed(stepped.session)) {
+  if (stepped.rejected || !stepped.deleteEncryptedCopy || !deletionAllowed(stepped.session)) {
     abortPlainExport("cancel");
-    toast("导出状态异常，未删除加密副本");
+    toast("导出状态异常，未移除加密副本");
     return;
   }
   exp.session = stepped.session;
-  askWhetherSaved(item, gen);
+  await removePresentedExport(item, gen);
 }
 
-function askWhetherSaved(item, gen) {
+async function removePresentedExport(item, gen) {
   const exp = state.plainExport;
-  if (!exp || exp.gen !== gen) return;
-  const wrap = document.createElement("div");
-  const lead = document.createElement("p");
-  lead.textContent =
-    "系统分享或下载已经交给系统，但这不等于文件已经存进「文件」、相册或网盘。请先到保存位置打开检查，确认未加密原视频完整可用。";
-  const warn = document.createElement("p");
-  warn.className = "alert alert-danger";
-  warn.textContent = PLAIN_EXPORT_WARNING;
-  wrap.append(lead, warn);
-  openSheet({
-    title: "请确认已经保存成功",
-    body: wrap,
-    onDismiss: () => {
-      if (state.plainExport?.gen === gen) abortPlainExport("deny-saved");
-    },
-    actions: [
-      {
-        label: "已经保存成功",
-        className: "btn-primary",
-        onClick: () => confirmSavedForExport(item, gen),
-      },
-      {
-        label: "还没有，先保留",
-        className: "btn-ghost",
-        onClick: () => abortPlainExport("deny-saved"),
-      },
-    ],
-  });
-}
-
-function confirmSavedForExport(item, gen) {
-  const exp = state.plainExport;
-  if (!exp || exp.gen !== gen || !state.unlocked || !state.dekKey) {
-    abortPlainExport("lock");
-    return;
-  }
-  const stepped = applyExportAction(exp.session, { type: "confirm-saved" });
-  if (stepped.rejected || stepped.deleteEncryptedCopy || !deletionAllowed(stepped.session)) {
-    abortPlainExport("cancel");
-    return;
-  }
-  exp.session = stepped.session;
-  askDeleteEncryptedCopy(item, gen);
-}
-
-function askDeleteEncryptedCopy(item, gen) {
-  const name = item.name || "未命名视频";
-  const wrap = document.createElement("div");
-  const lead = document.createElement("p");
-  lead.textContent = `你已确认「${name}」的未加密原视频保存成功。是否从 gitbb 中删除加密副本？可以只导出、不删除。`;
-  wrap.append(lead);
-  openSheet({
-    title: "删除 gitbb 里的加密副本？",
-    body: wrap,
-    onDismiss: () => keepExportedCopy(gen),
-    actions: [
-      {
-        label: "删除加密副本",
-        className: "btn-danger",
-        onClick: () => finalizeExportDelete(item, gen),
-      },
-      {
-        label: "只导出，不删除",
-        className: "btn-ghost",
-        onClick: () => keepExportedCopy(gen),
-      },
-    ],
-  });
-}
-
-function keepExportedCopy(gen) {
-  const exp = state.plainExport;
-  if (!exp || exp.gen !== gen) return;
-  const stepped = applyExportAction(exp.session, { type: "keep-copy" });
-  if (stepped.deleteEncryptedCopy) {
-    abortPlainExport("cancel");
-    return;
-  }
-  releasePlainFile(exp, { immediate: !exp.downloadTriggered });
-  state.plainExport = null;
-  state.exportGen += 1;
-  toast("已保留 gitbb 中的加密副本");
-}
-
-async function finalizeExportDelete(item, gen) {
-  const exp = state.plainExport;
-  if (!exp || exp.gen !== gen || exp.item.id !== item.id || !state.unlocked || !state.dekKey) {
-    abortPlainExport("lock");
-    return;
-  }
-  if (!deletionAllowed(exp.session)) {
-    abortPlainExport("cancel");
-    return;
-  }
+  if (!exp || exp.gen !== gen || exp.item.id !== item.id) return;
   const removed = await performDelete(item, "export");
-  if (!exportStillCurrent(gen)) return;
-  if (!removed) return;
-  applyExportAction(state.plainExport.session, { type: "confirm-delete" });
   releasePlainFile(exp, { immediate: !exp.downloadTriggered });
   state.plainExport = null;
   state.exportGen += 1;
+  if (!removed) {
+    state.exportBatch = null;
+    return;
+  }
+  const batch = state.exportBatch;
+  if (!batch) return;
+  const nextIndex = batch.index + 1;
+  if (nextIndex >= batch.ids.length) {
+    const count = batch.ids.length;
+    state.exportBatch = null;
+    if (count > 1) toast(`已从 gitbb 移除 ${count} 个`);
+    return;
+  }
+  batch.index = nextIndex;
+  const next = state.catalog.videos.find((video) => video.id === batch.ids[nextIndex]);
+  if (!next) {
+    state.exportBatch = null;
+    return;
+  }
+  armExportItem(next);
 }
 
 function openExportHelp() {
@@ -1625,6 +1641,8 @@ async function loadCurrentVideo(autoplay) {
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "");
     video.playsInline = true;
+    video.playbackRate = state.playbackRate;
+    applyFrameFit(video);
     video.src = state.videoObjectUrl;
     $("btn-prev").disabled = !state.playQueue.hasPrev();
     $("btn-next").disabled = !state.playQueue.hasNext();
@@ -1987,7 +2005,7 @@ function updateFaceUnlockButton() {
 }
 
 async function refreshSettingsPane() {
-  $("setting-autolock").value = String(state.settings.autoLockMs ?? 120000);
+  $("setting-autolock").value = String(IDLE_LOCK_MS);
   const est = await storageEstimate();
   $("storage-usage").textContent = est
     ? `${formatBytes(est.usage)} / ${formatBytes(est.quota)}`
@@ -2042,20 +2060,89 @@ async function removeFace() {
   toast("已关闭");
 }
 
+function applyFrameFit(video) {
+  const box = $("playerStage");
+  const fit = frameFit(
+    video?.videoWidth,
+    video?.videoHeight,
+    box?.clientWidth || window.innerWidth,
+    box?.clientHeight || window.innerHeight
+  );
+  if (box) box.dataset.bars = fit.bars;
+  if (video) video.dataset.fit = fit.fit;
+}
+
+function syncFullscreenClass() {
+  const root = $("view-player");
+  const active = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+  if (!active && !root.classList.contains("player-fill")) return;
+  if (!active) root.classList.remove("player-fill");
+  applyFrameFit($("playerVideo"));
+}
+
 async function toggleFullscreen() {
   const root = $("view-player");
-  try {
-    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-      if (root.requestFullscreen) await root.requestFullscreen();
-      else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
-    } else if (document.exitFullscreen) {
-      await document.exitFullscreen();
-    } else {
-      document.webkitExitFullscreen?.();
+  const active = Boolean(
+    document.fullscreenElement || document.webkitFullscreenElement || root.classList.contains("player-fill")
+  );
+  const plan = fullscreenStrategy({
+    active,
+    standard: typeof root.requestFullscreen === "function",
+    webkit: typeof root.webkitRequestFullscreen === "function",
+  });
+  if (plan === "exit") {
+    root.classList.remove("player-fill");
+    try {
+      if (document.exitFullscreen && (document.fullscreenElement || document.webkitFullscreenElement)) {
+        await document.exitFullscreen();
+      } else {
+        document.webkitExitFullscreen?.();
+      }
+    } catch {
+      /* 样式全屏已经退出 */
     }
-  } catch {
-    toast("当前环境无法进入页面全屏；视频已保持行内播放，以免系统控件接管");
+    applyFrameFit($("playerVideo"));
+    return;
   }
+  root.classList.add("player-fill");
+  try {
+    if (plan === "element") await root.requestFullscreen();
+    else if (plan === "element-webkit") root.webkitRequestFullscreen();
+  } catch {
+    /* 接口拒绝时仍用铺满画面的样式，控件留在播放器里 */
+  }
+  applyFrameFit($("playerVideo"));
+}
+
+function rememberRate(rate) {
+  state.playbackRate = clampRate(rate);
+  const video = $("playerVideo");
+  if (video) video.playbackRate = state.playbackRate;
+  const label = $("btn-rate");
+  if (label) label.textContent = formatRate(state.playbackRate);
+  const range = $("rate-range");
+  if (range) range.value = String(state.playbackRate);
+  const read = $("rate-readout");
+  if (read) read.textContent = formatRate(state.playbackRate);
+  try {
+    sessionStorage.setItem("gitbb-playback-rate", String(state.playbackRate));
+  } catch {
+    /* 会话存储不可用时，本次打开仍然记住 */
+  }
+}
+
+function skipPlayback(delta) {
+  const video = $("playerVideo");
+  if (!video || !video.src) return;
+  video.currentTime = skipTime(video.currentTime, delta, video.duration);
+  bumpActivity();
+}
+
+function toggleRatePanel() {
+  const panel = $("rate-panel");
+  if (!panel) return;
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) showPlayerControls(true);
 }
 
 
@@ -2119,7 +2206,28 @@ function bindEvents() {
     const file = ev.target.files && ev.target.files[0];
     if (file) handleBackupFile(file);
   });
-  $("btn-shuffle").addEventListener("click", () => playFromLibrary(null, true));
+  $("btn-shuffle").addEventListener("click", () => {
+    if (state.selecting) return;
+    playFromLibrary(null, true);
+  });
+  $("btn-select").addEventListener("click", () => {
+    if (state.selecting) exitSelectMode();
+    else {
+      state.selecting = true;
+      state.selected.clear();
+      updateSelectBar();
+      renderLibrary();
+    }
+  });
+  $("btn-select-done").addEventListener("click", exitSelectMode);
+  $("btn-export-selected").addEventListener("click", () => {
+    const items = state.catalog.videos.filter((video) => state.selected.has(video.id));
+    if (!items.length) {
+      toast("先选择文件");
+      return;
+    }
+    startPlainExport(items);
+  });
   $("btn-settings").addEventListener("click", async () => {
     await refreshSettingsPane();
     showView("view-settings");
@@ -2128,7 +2236,7 @@ function bindEvents() {
     showView("view-library");
   });
   $("setting-autolock").addEventListener("change", async (ev) => {
-    state.settings.autoLockMs = Number(ev.target.value);
+    state.settings.autoLockMs = IDLE_LOCK_MS;
     await saveSettings(state.settings);
     bumpActivity();
   });
@@ -2166,6 +2274,23 @@ function bindEvents() {
   $("btn-prev").addEventListener("click", () => goRelative(-1));
   $("btn-next").addEventListener("click", () => goRelative(1));
   $("btn-fullscreen").addEventListener("click", toggleFullscreen);
+  $("btn-back-10").addEventListener("click", () => skipPlayback(-SKIP_SECONDS));
+  $("btn-forward-10").addEventListener("click", () => skipPlayback(SKIP_SECONDS));
+  $("btn-rate").addEventListener("click", toggleRatePanel);
+  const presets = $("rate-presets");
+  for (const rate of RATE_PRESETS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn btn-ghost rate-preset";
+    button.textContent = formatRate(rate);
+    button.addEventListener("click", () => rememberRate(rate));
+    presets.append(button);
+  }
+  $("rate-range").addEventListener("input", (ev) => rememberRate(ev.target.value));
+  document.addEventListener("fullscreenchange", syncFullscreenClass);
+  document.addEventListener("webkitfullscreenchange", syncFullscreenClass);
+  window.addEventListener("resize", () => applyFrameFit($("playerVideo")));
+  window.addEventListener("orientationchange", () => applyFrameFit($("playerVideo")));
   $("seekBar").addEventListener("input", () => {
     state.seeking = true;
   });
@@ -2189,8 +2314,14 @@ function bindEvents() {
     showPlayerControls(true);
     bumpActivity();
   });
-  video.addEventListener("timeupdate", updateTimeUi);
-  video.addEventListener("loadedmetadata", updateTimeUi);
+  video.addEventListener("timeupdate", () => {
+    updateTimeUi();
+    if (!video.paused) clearIdleTimer();
+  });
+  video.addEventListener("loadedmetadata", () => {
+    updateTimeUi();
+    applyFrameFit(video);
+  });
   video.addEventListener("ended", async () => {
     if (state.playQueue?.hasNext()) {
       await goRelative(1);
@@ -2217,25 +2348,24 @@ function bindEvents() {
   document.addEventListener("pointerdown", bumpActivity, { passive: true });
   document.addEventListener("keydown", bumpActivity);
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden && state.settings.lockOnBackground !== false) {
-      if (canAutoLock()) lock("进入后台");
-      else if (!state.unlocked && (state.dekBytes || state.pendingPin)) {
-        dropKeys();
-        state.pendingPin = null;
-        if (state.vaultRecord && (state.pinFails || 0) >= PIN_FAILS_BEFORE_RECOVERY && state.recoveryRecord?.question) {
-          showSecret("recover");
-        } else if (!state.vaultRecord) {
-          showGate("setup-choose");
-        } else {
-          showGate("unlock");
-        }
+    if (document.hidden && shouldLockOnBackground(playbackFlags())) {
+      lock("进入后台");
+    } else if (document.hidden && !state.unlocked && (state.dekBytes || state.pendingPin)) {
+      dropKeys();
+      state.pendingPin = null;
+      if (state.vaultRecord && (state.pinFails || 0) >= PIN_FAILS_BEFORE_RECOVERY && state.recoveryRecord?.question) {
+        showSecret("recover");
+      } else if (!state.vaultRecord) {
+        showGate("setup-choose");
+      } else {
+        showGate("unlock");
       }
     } else if (!document.hidden && state.currentView === "view-player" && !$("playerVideo").paused) {
       tryWakeLock();
     }
   });
   window.addEventListener("pagehide", () => {
-    if (canAutoLock()) lock("页面隐藏");
+    if (shouldLockOnBackground(playbackFlags())) lock("页面隐藏");
   });
   $("overlay").addEventListener("click", (ev) => {
     if (ev.target !== $("overlay")) return;
@@ -2281,6 +2411,16 @@ async function boot() {
   }
   registerSw();
   state.settings = await loadSettings();
+  if (state.settings.autoLockMs !== IDLE_LOCK_MS) {
+    state.settings.autoLockMs = IDLE_LOCK_MS;
+    await saveSettings(state.settings);
+  }
+  try {
+    state.playbackRate = clampRate(sessionStorage.getItem("gitbb-playback-rate") || 1);
+  } catch {
+    state.playbackRate = 1;
+  }
+  rememberRate(state.playbackRate);
   state.vaultRecord = (await kvGet(KEY_VAULT)) || null;
   state.recoveryRecord = (await kvGet(KEY_RECOVERY)) || null;
   state.webauthn = (await kvGet(KEY_WEBAUTHN)) || null;

@@ -1,6 +1,6 @@
 /* 只缓存程序文件，绝不缓存用户文件。 */
 
-const CACHE = "gitbb-v5";
+const CACHE = "gitbb-v6";
 const ASSETS = [
   "./",
   "./index.html",
@@ -16,6 +16,8 @@ const ASSETS = [
   "./js/export.js",
   "./js/pinflow.js",
   "./js/recovery.js",
+  "./js/lock-policy.js",
+  "./js/playback.js",
 ];
 
 const ASSET_PATHS = new Set(ASSETS.map((path) => new URL(path, self.location).pathname));

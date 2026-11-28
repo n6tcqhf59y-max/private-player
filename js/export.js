@@ -2,25 +2,28 @@
  * 解密导出的纯决策与文件名。
  *
  * 不变量：
- * - 系统分享 Promise 完成、或下载被触发，都只是「交给系统」，不是保存成功。
- * - 只有用户明确确认「已经保存成功」之后，才允许询问删除。
- * - 只有用户再明确点删除，才标记为可删除。
- * - 取消、失败、错误密钥、锁定都不会删除。
+ * - 导出前必须先看到未加密警告，用户确认后才解密。
+ * - 系统分享面板打开，或下载被触发，才表示导出流程已经摆出来。
+ * - 流程摆出来之后立刻移除资料库里的加密副本，不再询问是否保存成功。
+ * - 在分享面板打开之前取消、解密失败、分享面板没能打开、或锁定，都不移除。
+ * 多个文件逐个分享。iOS 一次分享多个文件不可靠。
  * 本模块不访问网络，也不读取任何真实视频。
  */
 
 export const PLAIN_EXPORT_WARNING =
   "导出的是未加密原视频，不再受播放器密码或面容保护。";
 
+export const EXPORT_REMOVE_NOTE =
+  "系统分享面板一旦打开，这个文件会立刻从 gitbb 里移除，即使你在面板里取消也一样。";
+
 export const EXPORT_HELP_PARAGRAPHS = [
-  "在文件夹里点文件右上角，打开「删除这部视频？」。可以解密导出，也可以删除或取消。",
-  "点「解密导出」后，会先在这台设备上解密出原视频，再请你点「保存到系统…」。iPhone 的 Safari 和主屏幕应用要求这一步由你的点击直接唤起系统分享。",
-  "请在系统分享里把视频存到「文件」、相册，或你自己的网盘。gitbb 不会把视频上传到开发者的服务器，也不会发给任何第三方服务。",
+  "点右上角「选择」，勾选一个或多个文件，再点「解密导出」。也可以在单个文件的删除框里点「解密导出」。",
+  "确认导出之前会先说明这是未加密原视频，并且分享面板打开后会从 gitbb 里移除。",
+  "点「解密导出」后，会先在这台设备上解密，再请你点「保存到系统…」。iPhone 的 Safari 和主屏幕应用要求这一步由你的点击直接唤起系统分享。多个文件会一个接一个打开。",
+  "请在系统分享里把视频存到「文件」、相册，或你自己的网盘。gitbb 不会把视频上传到开发者的服务器。网页应用不能直接写回原来的相册或文件夹。",
   `${PLAIN_EXPORT_WARNING}拿到该文件的人无需路径或面容即可播放。`,
-  "点保存之前如果离开本页，gitbb 会锁定并取消这次导出，加密副本不会被删除。系统分享面板打开之后，请在面板里完成保存。",
-  "系统分享窗口关闭，或者浏览器开始下载，都只说明系统接手了文件，不等于已经落盘。请亲自打开保存位置检查。",
-  "只有你明确点「已经保存成功」之后，才会另外询问是否删除 gitbb 里的加密副本。你可以只导出、不删除。",
-  "取消、分享失败、解密失败、密钥不对，或应用锁定时，都不会删除加密副本。",
+  EXPORT_REMOVE_NOTE,
+  "点「保存到系统…」之前如果取消，加密副本不会移除。解密失败、密钥不对，或分享面板没能打开，也不会移除。",
 ];
 
 const MIME_EXT = {
@@ -33,7 +36,19 @@ const MIME_EXT = {
   "video/hevc": ".hevc",
 };
 
-const TERMINAL = new Set(["aborted", "deleted", "kept"]);
+const TERMINAL = new Set(["aborted", "presented"]);
+const PRESENTED = new Set(["share-resolved", "share-aborted", "download-triggered"]);
+
+export function uniqueExportIds(ids) {
+  const out = [];
+  const seen = new Set();
+  for (const id of Array.isArray(ids) ? ids : []) {
+    if (typeof id !== "string" || !id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
 
 export function createExportSession(videoId) {
   if (typeof videoId !== "string" || !videoId) {
@@ -76,52 +91,20 @@ function reduceExport(session, type) {
       if (session.phase !== "decrypting") return null;
       return abort(session, "wrong-key");
     case "share-resolved":
+    case "share-aborted":
     case "download-triggered":
       if (session.phase !== "ready") return null;
       return {
         ...session,
-        phase: "handoff",
+        phase: "presented",
         handoff: type,
-        deleteArmed: false,
-        deleted: false,
-        rejected: false,
-      };
-    case "share-aborted":
-      if (session.phase !== "ready" && session.phase !== "handoff") return null;
-      return abort(session, "share-aborted");
-    case "share-failed":
-      if (session.phase !== "ready" && session.phase !== "handoff") return null;
-      return abort(session, "share-failed");
-    case "confirm-saved":
-      if (session.phase !== "handoff") return null;
-      return {
-        ...session,
-        phase: "saved-confirmed",
-        deleteArmed: true,
-        deleted: false,
-        rejected: false,
-      };
-    case "deny-saved":
-      if (session.phase !== "handoff") return null;
-      return abort(session, "not-saved");
-    case "confirm-delete":
-      if (session.phase !== "saved-confirmed" || session.deleteArmed !== true) return null;
-      return {
-        ...session,
-        phase: "deleted",
         deleteArmed: true,
         deleted: true,
         rejected: false,
       };
-    case "keep-copy":
-      if (session.phase !== "saved-confirmed") return null;
-      return {
-        ...session,
-        phase: "kept",
-        deleteArmed: false,
-        deleted: false,
-        rejected: false,
-      };
+    case "share-failed":
+      if (session.phase !== "ready") return null;
+      return abort(session, "share-failed");
     case "cancel":
       return abort(session, "cancel");
     case "lock":
@@ -132,7 +115,7 @@ function reduceExport(session, type) {
 }
 
 /**
- * 推进一次导出。deleteEncryptedCopy 仅在「确认已保存」之后又明确确认删除时为 true。
+ * 推进一次导出。分享面板已经打开，或下载已经触发时，deleteEncryptedCopy 为 true。
  */
 export function applyExportAction(session, action) {
   if (!session || typeof session.videoId !== "string" || !session.videoId) {
@@ -147,7 +130,7 @@ export function applyExportAction(session, action) {
   }
   const type = action?.type;
   const next = reduceExport(session, type);
-  if (!next || (next.deleted && type !== "confirm-delete")) {
+  if (!next || (next.deleted && !PRESENTED.has(type))) {
     return {
       session: { ...session, rejected: true },
       deleteEncryptedCopy: false,
@@ -156,18 +139,13 @@ export function applyExportAction(session, action) {
   }
   return {
     session: next,
-    deleteEncryptedCopy: next.phase === "deleted" && next.deleted === true,
+    deleteEncryptedCopy: next.phase === "presented" && next.deleted === true,
     rejected: false,
   };
 }
 
 export function deletionAllowed(session) {
-  return Boolean(
-    session &&
-      session.phase === "saved-confirmed" &&
-      session.deleteArmed === true &&
-      session.deleted === false
-  );
+  return Boolean(session && session.phase === "presented" && session.deleted === true);
 }
 
 export function replayExport(videoId, steps) {

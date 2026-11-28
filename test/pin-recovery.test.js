@@ -245,7 +245,7 @@ describe("随机打开与界面伪装", () => {
     for (const file of [html, manifest, app, readme]) {
       assert.equal(file.includes("私密播放器"), false);
     }
-    assert.match(sw, /gitbb-v5/);
+    assert.match(sw, /gitbb-v6/);
     assert.doesNotMatch(readRoot("js/recovery.js"), /MIN_ANSWER_LENGTH|MAX_ANSWER_LENGTH|答案太短|答案太长/);
     assert.doesNotMatch(html, /id="secret-answer"[\s\S]*?maxlength/);
     assert.doesNotMatch(html, /id="secret-answer2"[\s\S]*?maxlength/);
@@ -262,8 +262,10 @@ describe("随机打开与界面伪装", () => {
     assert.match(app, /createRecoveryRecord/);
     assert.match(app, /PIN_FAILS_BEFORE_RECOVERY/);
     assert.match(readme, /60 万/);
-    assert.match(readme, /已经保存成功/);
-    assert.match(html, /已经保存成功/);
+    assert.match(readme, /系统分享面板一旦打开/);
+    assert.match(html, /系统分享面板一旦打开/);
+    assert.equal(readme.includes("已经保存成功"), false);
+    assert.equal(html.includes("已经保存成功"), false);
     assert.match(html, /解密导出/);
   });
 });

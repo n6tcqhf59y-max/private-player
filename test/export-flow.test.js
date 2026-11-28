@@ -16,6 +16,7 @@ import {
 } from "../js/crypto.js";
 import {
   EXPORT_HELP_PARAGRAPHS,
+  EXPORT_REMOVE_NOTE,
   PLAIN_EXPORT_WARNING,
   applyExportAction,
   bytesEqual,
@@ -26,6 +27,7 @@ import {
   plainUrlRevokeDelayMs,
   replayExport,
   shouldSuppressAutoLock,
+  uniqueExportIds,
 } from "../js/export.js";
 
 const root = new URL("..", import.meta.url);
@@ -113,119 +115,58 @@ describe("解密导出字节", () => {
   });
 });
 
-describe("确认流程", () => {
-  const savedThenDelete = [
-    "accept-warning",
-    "decrypt-ok",
-    "share-resolved",
-    "confirm-saved",
-    "confirm-delete",
-  ];
-
-  it("只有明确确认已经保存成功后，再确认删除，才会删除一次", () => {
-    const replay = replayExport("vid-1", savedThenDelete);
-    assert.equal(replay.deleteCalls, 1);
-    assert.equal(replay.session.phase, "deleted");
-    assert.equal(replay.trace.filter((step) => step.deleteEncryptedCopy).length, 1);
-    assert.equal(replay.trace[2].phase, "handoff");
-    assert.equal(replay.trace[2].deleteArmed, false);
-    assert.equal(replay.trace[2].deleteEncryptedCopy, false);
-    assert.equal(deletionAllowed(replay.trace[2] && { ...replay.session, phase: "handoff", deleteArmed: false, deleted: false }), false);
-  });
-
-  it("分享完成或下载触发都不等于保存成功，也不能删除", () => {
-    for (const handoff of ["share-resolved", "download-triggered"]) {
-      const replay = replayExport("vid-2", ["accept-warning", "decrypt-ok", handoff, "confirm-delete"]);
-      assert.equal(replay.deleteCalls, 0);
-      assert.equal(replay.session.phase, "handoff");
-      assert.equal(replay.session.deleteArmed, false);
-      assert.equal(deletionAllowed(replay.session), false);
-      assert.equal(replay.trace.at(-1).rejected, true);
+describe("导出流程", () => {
+  it("分享面板打开或下载触发后立刻移除一次，不再询问是否保存成功", () => {
+    for (const handoff of ["share-resolved", "share-aborted", "download-triggered"]) {
+      const replay = replayExport("vid-1", ["accept-warning", "decrypt-ok", handoff]);
+      assert.equal(replay.deleteCalls, 1, handoff);
+      assert.equal(replay.session.phase, "presented", handoff);
+      assert.equal(replay.session.deleted, true, handoff);
+      assert.equal(deletionAllowed(replay.session), true, handoff);
+      const again = replayExport("vid-1", ["accept-warning", "decrypt-ok", handoff, "confirm-delete"]);
+      assert.equal(again.deleteCalls, 1, handoff);
     }
   });
 
-  it("确认已保存后仍可只导出不删除", () => {
-    const replay = replayExport("vid-3", [
-      "accept-warning",
-      "decrypt-ok",
-      "download-triggered",
-      "confirm-saved",
-      "keep-copy",
-      "confirm-delete",
-    ]);
-    assert.equal(replay.deleteCalls, 0);
-    assert.equal(replay.session.phase, "kept");
-    assert.equal(replay.session.deleted, false);
-    const afterSaved = createExportSession("vid-3");
-    let session = afterSaved;
-    for (const type of ["accept-warning", "decrypt-ok", "share-resolved", "confirm-saved"]) {
-      session = applyExportAction(session, { type }).session;
-    }
-    assert.equal(deletionAllowed(session), true);
-    const kept = applyExportAction(session, { type: "keep-copy" });
-    assert.equal(kept.deleteEncryptedCopy, false);
-    assert.equal(deletionAllowed(kept.session), false);
+  it("多个 id 会去重并保持顺序", () => {
+    assert.deepEqual(uniqueExportIds(["b", "a", "b", "", null, "a", "c"]), ["b", "a", "c"]);
   });
 
-  it("取消、失败、未保存和锁定本身都不会删除", () => {
-    const prefixes = [
-      [],
-      ["accept-warning"],
-      ["accept-warning", "decrypt-ok"],
-      ["accept-warning", "decrypt-ok", "share-resolved"],
-      ["accept-warning", "decrypt-ok", "download-triggered"],
-      ["accept-warning", "decrypt-ok", "share-resolved", "confirm-saved"],
-    ];
-    const stops = ["cancel", "lock", "share-aborted", "share-failed", "deny-saved", "decrypt-fail", "wrong-key"];
+  it("分享面板打开之前取消、失败或锁定都不会移除", () => {
+    const prefixes = [[], ["accept-warning"], ["accept-warning", "decrypt-ok"]];
+    const stops = ["cancel", "lock", "share-failed", "decrypt-fail", "wrong-key"];
     for (const prefix of prefixes) {
       for (const stop of stops) {
+        if (prefix.length < 2 && (stop === "share-failed")) continue;
+        if (prefix.length < 1 && (stop === "decrypt-fail" || stop === "wrong-key")) continue;
         const label = `${prefix.join(",") || "idle"} + ${stop}`;
         const replay = replayExport("vid-4", [...prefix, stop]);
         assert.equal(replay.deleteCalls, 0, label);
         assert.equal(replay.session.deleted, false, label);
-        if (replay.session.phase === "saved-confirmed") continue;
-        const followed = replayExport("vid-4", [...prefix, stop, "confirm-delete"]);
-        assert.equal(followed.deleteCalls, 0, `${label} 之后不能删除`);
-        assert.notEqual(followed.session.phase, "deleted", label);
+        assert.notEqual(replay.session.phase, "presented", label);
       }
     }
   });
 
-  it("未走完确认流程时直接删除会被拒绝", () => {
-    const replay = replayExport("vid-5", ["confirm-delete", "confirm-saved", "decrypt-ok"]);
+  it("还没解密就说分享已打开，不会移除", () => {
+    const replay = replayExport("vid-5", ["share-resolved", "download-triggered", "share-aborted"]);
     assert.equal(replay.deleteCalls, 0);
     assert.equal(replay.session.phase, "idle");
     assert.equal(replay.trace.every((step) => step.rejected), true);
   });
-
-  it("用户否认已经保存成功后不能删除", () => {
-    const replay = replayExport("vid-6", [
-      "accept-warning",
-      "decrypt-ok",
-      "share-resolved",
-      "deny-saved",
-      "confirm-saved",
-      "confirm-delete",
-    ]);
-    assert.equal(replay.deleteCalls, 0);
-    assert.equal(replay.session.cancelReason, "not-saved");
-    assert.equal(deletionAllowed(replay.session), false);
-  });
 });
 
 describe("分享期间的锁定与 Blob URL", () => {
-  it("分享进行中抑制自动锁定；锁定动作本身仍然不删除", () => {
+  it("分享进行中抑制自动锁定；面板打开后才移除，之后再锁定不会再移除一次", () => {
     assert.equal(shouldSuppressAutoLock({ exportShareActive: true, busy: 0 }), true);
     assert.equal(shouldSuppressAutoLock({ exportShareActive: false, busy: 2 }), true);
     assert.equal(shouldSuppressAutoLock({ exportShareActive: false, busy: 0 }), false);
-    const replay = replayExport("vid-7", [
-      "accept-warning",
-      "decrypt-ok",
-      "share-resolved",
-      "lock",
-    ]);
-    assert.equal(replay.deleteCalls, 0);
-    assert.equal(replay.session.cancelReason, "lock");
+    const before = replayExport("vid-7", ["accept-warning", "decrypt-ok", "lock"]);
+    assert.equal(before.deleteCalls, 0);
+    assert.equal(before.session.cancelReason, "lock");
+    const after = replayExport("vid-7", ["accept-warning", "decrypt-ok", "share-resolved", "lock"]);
+    assert.equal(after.deleteCalls, 1);
+    assert.equal(after.session.phase, "presented");
   });
 
   it("分享进行中不撤销 URL；下载后延迟撤销；锁定时立即撤销", () => {
@@ -250,21 +191,24 @@ describe("文件名与说明", () => {
     assert.ok(named.length <= 180);
   });
 
-  it("界面文案写明未加密，且帮助说明要求单独确认保存成功", () => {
+  it("界面在导出前写明未加密，分享面板打开后移除，不再询问是否保存成功", () => {
     assert.equal(PLAIN_EXPORT_WARNING, "导出的是未加密原视频，不再受播放器密码或面容保护。");
     assert.ok(EXPORT_HELP_PARAGRAPHS.some((line) => line.includes(PLAIN_EXPORT_WARNING)));
-    assert.ok(EXPORT_HELP_PARAGRAPHS.some((line) => line.includes("已经保存成功")));
-    assert.ok(EXPORT_HELP_PARAGRAPHS.some((line) => line.includes("只导出、不删除")));
+    assert.ok(EXPORT_HELP_PARAGRAPHS.some((line) => line.includes(EXPORT_REMOVE_NOTE)));
+    assert.ok(EXPORT_HELP_PARAGRAPHS.every((line) => !line.includes("已经保存成功")));
     const app = readRoot("js/app.js");
     const html = readRoot("index.html");
     const readme = readRoot("README.md");
     assert.ok(app.includes("PLAIN_EXPORT_WARNING"));
-    assert.ok(app.includes("已经保存成功"));
+    assert.ok(app.includes("EXPORT_REMOVE_NOTE"));
     assert.ok(app.includes("解密导出"));
+    assert.ok(!app.includes("已经保存成功"));
     assert.ok(html.includes(PLAIN_EXPORT_WARNING));
-    assert.ok(html.includes("已经保存成功"));
+    assert.ok(html.includes("系统分享面板一旦打开"));
+    assert.ok(!html.includes("已经保存成功"));
     assert.ok(readme.includes(PLAIN_EXPORT_WARNING));
-    assert.ok(readme.includes("已经保存成功"));
+    assert.ok(readme.includes("系统分享面板一旦打开"));
+    assert.ok(!readme.includes("已经保存成功"));
     assert.ok(app.includes('performDelete(item, "library")'));
     assert.ok(app.includes('performDelete(item, "export")'));
     assert.deepEqual(
@@ -314,8 +258,8 @@ describe("现有加密格式仍兼容", () => {
 describe("service worker", () => {
   it("缓存版本已更新，并包含新的导出模块", () => {
     const sw = readRoot("sw.js");
-    assert.match(sw, /gitbb-v5/);
-    assert.doesNotMatch(sw, /gitbb-v4/);
+    assert.match(sw, /gitbb-v6/);
+    assert.doesNotMatch(sw, /gitbb-v5/);
     assert.doesNotMatch(sw, /private-player-v2/);
     assert.doesNotMatch(sw, /private-player-v1/);
     assert.match(sw, /networkFirst/);
