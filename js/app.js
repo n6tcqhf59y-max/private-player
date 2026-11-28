@@ -572,14 +572,14 @@ function showSecret(mode) {
     $("secret-title").textContent = "留一个问题";
     $("secret-lead").textContent = "忘记六层路径时，会用这个问题改一条新路径。答案不会明文保存。";
     $("secret-hint").textContent =
-      "答案请只有你自己知道，不要太短，也不要写别人能猜到的词。保存时会去掉首尾空格。";
+      "答案不会明文保存，长短随意。保存时会去掉首尾空格；如果去掉之后什么都不剩，就无法使用。";
     $("btn-secret-submit").textContent = "完成";
   } else if (mode === "edit") {
     $("secret-title").textContent = "更改问题";
     question.value = state.recoveryRecord?.question || "";
     $("secret-lead").textContent = "换一道只有你能回答的问题。答对才能在忘记路径后重设路径。";
     $("secret-hint").textContent =
-      "答案请只有你自己知道，不要太短。保存时会去掉首尾空格。旧答案在保存后失效。";
+      "答案不会明文保存，长短随意。保存时会去掉首尾空格。旧答案在保存后失效。";
     $("btn-secret-submit").textContent = "保存";
   } else {
     $("secret-title").textContent = "gitbb";

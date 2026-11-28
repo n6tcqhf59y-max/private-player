@@ -1,6 +1,6 @@
 /* 只缓存程序文件，绝不缓存用户文件。 */
 
-const CACHE = "gitbb-v4";
+const CACHE = "gitbb-v5";
 const ASSETS = [
   "./",
   "./index.html",

@@ -15,8 +15,6 @@ import {
   wrapDEK,
 } from "./crypto.js";
 
-export const MIN_ANSWER_LENGTH = 4;
-export const MAX_ANSWER_LENGTH = 200;
 export const MIN_QUESTION_LENGTH = 2;
 export const MAX_QUESTION_LENGTH = 80;
 export const RECOVERY_FAILS_PER_LOCK = 5;
@@ -60,13 +58,6 @@ export function normalizeQuestion(value) {
 export function assertAnswer(value) {
   const answer = normalizeAnswer(value);
   if (!answer) throw new CryptoError("请填写答案。", "EMPTY_ANSWER");
-  const length = charLength(answer);
-  if (length < MIN_ANSWER_LENGTH) {
-    throw new CryptoError("答案太短。请换一个只有你知道、更长一些的答案。", "SHORT_ANSWER");
-  }
-  if (length > MAX_ANSWER_LENGTH) {
-    throw new CryptoError("答案太长。", "LONG_ANSWER");
-  }
   return answer;
 }
 
@@ -105,7 +96,7 @@ export async function createRecoveryRecord(question, answer, dekBytes, options =
 
 /**
  * 答案正确则返回 DEK。错误答案不会返回任何密钥。
- * 这里不做最短长度检查，避免用不同的报错暴露答案规则。
+ * 答案没有最短或最长限制。去掉首尾空白后如果什么都不剩，无法派生密钥。
  */
 export async function unlockRecovery(record, answer) {
   if (!record || record.kdf !== "PBKDF2-SHA-256" || !record.question) {
