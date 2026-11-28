@@ -107,6 +107,7 @@
       <section id="view-library" class="view" hidden>
         <header class="topbar">
           <h2>gitbb</h2>
+          <button class="btn btn-text" id="btn-select" type="button">选择</button>
           <button class="btn btn-icon" id="btn-import" type="button" aria-label="添加文件" title="添加文件">
             <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
           </button>
@@ -137,6 +138,11 @@
           </div>
           <div class="grid" id="library-grid"></div>
         </div>
+        <div id="select-bar" class="select-bar" hidden>
+          <span id="select-count">已选 0</span>
+          <button class="btn btn-primary" id="btn-export-selected" type="button">解密导出</button>
+          <button class="btn btn-ghost" id="btn-select-done" type="button">完成</button>
+        </div>
       </section>
 
       <section id="view-settings" class="view" hidden>
@@ -152,10 +158,7 @@
             <div class="row">
               <label class="label" for="setting-autolock">自动锁定</label>
               <select id="setting-autolock">
-                <option value="60000">1 分钟闲置</option>
-                <option value="120000">2 分钟闲置</option>
-                <option value="300000">5 分钟闲置</option>
-                <option value="0">仅切换到后台时</option>
+                <option value="600000">10 分钟无操作</option>
               </select>
             </div>
             <button class="row" type="button" id="btn-change-pass">
@@ -175,6 +178,9 @@
               <span class="value">仍可使用路径</span>
             </button>
             <p class="row-note" id="face-note"></p>
+            <p class="row-note">
+              正在播放时不会因为闲置而锁定。暂停或停止后，10 分钟没有操作才会锁定。系统分享打开时不会锁定。
+            </p>
           </div>
           <div class="group">
             <h3>备份（仅保存到你自己的文件或网盘）</h3>
@@ -195,7 +201,7 @@
               <span class="value">未加密</span>
             </button>
             <p class="row-note">
-              导出的是未加密原视频，不再受播放器密码或面容保护。文件只通过系统分享留在你自己的「文件」、相册或网盘，不会上传到开发者的服务器。系统分享结束或开始下载，都不代表已经保存成功。只有你点「已经保存成功」之后，才会再询问是否删除加密副本。
+              导出的是未加密原视频，不再受播放器密码或面容保护。系统分享面板一旦打开，这个文件会立刻从 gitbb 里移除，即使你在面板里取消也一样。文件经系统分享留在你自己的「文件」、相册或网盘，不会上传到开发者的服务器。网页应用不能直接写回原来的相册或文件夹。
             </p>
           </div>
           <div class="group">
@@ -264,6 +270,7 @@
                 <span id="timeTotal">0:00</span>
               </div>
               <div class="transport">
+                <button class="btn btn-skip" id="btn-back-10" type="button" aria-label="后退 10 秒">−10</button>
                 <button class="btn btn-icon" id="btn-prev" type="button" aria-label="上一条">
                   <svg viewBox="0 0 24 24"><path d="M18 5v14L8 12z" fill="currentColor" stroke="none" /><path d="M6 5v14" /></svg>
                 </button>
@@ -274,6 +281,15 @@
                 <button class="btn btn-icon" id="btn-next" type="button" aria-label="下一条">
                   <svg viewBox="0 0 24 24"><path d="M6 5v14l10-7z" fill="currentColor" stroke="none" /><path d="M18 5v14" /></svg>
                 </button>
+                <button class="btn btn-skip" id="btn-forward-10" type="button" aria-label="前进 10 秒">+10</button>
+              </div>
+              <div class="rate-row">
+                <button class="btn btn-ghost" id="btn-rate" type="button" aria-label="播放速度">1×</button>
+              </div>
+              <div id="rate-panel" class="rate-panel" hidden>
+                <div id="rate-presets" class="rate-presets"></div>
+                <label class="rate-precise" for="rate-range">精确 <span id="rate-readout">1×</span></label>
+                <input id="rate-range" type="range" min="0.1" max="4" step="0.1" value="1" />
               </div>
             </div>
           </div>
