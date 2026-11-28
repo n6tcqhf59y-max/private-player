@@ -24,7 +24,6 @@ import {
 } from "../js/pinflow.js";
 import { nextShuffleQueue } from "../js/queue.js";
 import {
-  MIN_ANSWER_LENGTH,
   assessRecoveryGuard,
   clearRecoveryGuard,
   createRecoveryRecord,
@@ -150,9 +149,17 @@ describe("找回问题", () => {
 
     await assert.rejects(() => unlockRecovery(recovery, "蓝色海岸"));
     await assert.rejects(() => unlockRecovery(recovery, "   "));
-    await assert.rejects(() => createRecoveryRecord("问题", "短", dekBytes, FAST), /太短/);
+    await assert.rejects(() => createRecoveryRecord("问题", "   \u200b", dekBytes, FAST), /请填写答案/);
     assert.equal(normalizeAnswer("  a\u200b  "), "a");
-    assert.ok(MIN_ANSWER_LENGTH >= 4);
+
+    const short = await createRecoveryRecord("问题", "短", dekBytes, FAST);
+    assert.equal(bytesEqual(await unlockRecovery(short, "短"), dekBytes), true);
+    const one = await createRecoveryRecord("问题", " a ", dekBytes, FAST);
+    assert.equal(bytesEqual(await unlockRecovery(one, "a"), dekBytes), true);
+    const longAnswer = "甲".repeat(300);
+    const longRecord = await createRecoveryRecord("问题", longAnswer, dekBytes, FAST);
+    assert.equal(bytesEqual(await unlockRecovery(longRecord, longAnswer), dekBytes), true);
+    assert.equal(JSON.stringify(short).includes("短"), false);
   });
 
   it("答对后重设路径，新旧路径都能按预期解密或拒绝", async () => {
@@ -238,7 +245,10 @@ describe("随机打开与界面伪装", () => {
     for (const file of [html, manifest, app, readme]) {
       assert.equal(file.includes("私密播放器"), false);
     }
-    assert.match(sw, /gitbb-v4/);
+    assert.match(sw, /gitbb-v5/);
+    assert.doesNotMatch(readRoot("js/recovery.js"), /MIN_ANSWER_LENGTH|MAX_ANSWER_LENGTH|答案太短|答案太长/);
+    assert.doesNotMatch(html, /id="secret-answer"[\s\S]*?maxlength/);
+    assert.doesNotMatch(html, /id="secret-answer2"[\s\S]*?maxlength/);
     assert.doesNotMatch(html, /rel="icon"|apple-touch-icon|icons\//);
     assert.doesNotMatch(manifest, /"icons"/);
     assert.doesNotMatch(sw, /icons\//);
